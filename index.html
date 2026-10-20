@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#202124">
-    <title>강은지 직원용 시스템(v2.58)</title>
+    <title>강은지 직원용 시스템(v2.61)</title>
 
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
@@ -37,8 +37,8 @@
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
-        const APP_VERSION = "v2.58";
-        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbwC6u5ZjrKYmhiIOMuSxSaNRvTaiphDMIM6w2puihCkkapCpuePrKa4cj8yRfyQMKv1/exec';
+        const APP_VERSION = "v2.61";
+        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbx1rWCPnPf23AFtsCgPrHwP1mpFXO_5cW6bRdRkj_pfdLmODk3z19gMXg-GLQw7ET9D/exec';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
         const DEFAULT_DEP_SHEET_ID = '14bx2HMd_NID3zQN-Hb0x0At2Qmti7-p1Zfx1ZadNScY';
 
@@ -65,19 +65,40 @@
         const SYSTEM_EXCLUDE_TABS = new Set([
             '찐고객사전', '실시간재고', '고객상태관리', '방송별상품보관함',
             '채팅기록', '교환반품CS', '재고단가', '닉네임', '메인주문',
-            '주문_오늘의방송', '오늘의방송',
+            '주문_오늘의방송', '오늘의방송', '10/18 여성복',
             '시트1', '시트2', '시트3', '시트4', '시트5', 'Sheet1', 'Sheet2'
         ]);
 
-        // v2.44에서 53명을 정상적으로 불러왔던 탭 표준화 로직 복원 (단, 슬래시 '/'가 들어간 일반 시트는 제외하여 정확히 2개 방송만 유지)
+        // '주문_10/20 악세사리'처럼 슬래시('/')가 포함된 신규 방송 시트도 정상적으로 불러오도록 허용 (단, 옛날 별도 시트 '10/18 여성복'만 제외)
         const toCanonicalOrderTab = (name) => {
             const s = String(name || '').trim();
             if (!s) return null;
-            if (s.includes('/')) return null; // '10/18 여성복'처럼 주문_ 시트가 아닌 별도 시트 제외
             const withoutPrefix = s.replace(/^주문_/, '').trim();
             if (!withoutPrefix || SYSTEM_EXCLUDE_TABS.has(s) || SYSTEM_EXCLUDE_TABS.has(withoutPrefix)) return null;
             if (/^(시트|sheet)\d*$/i.test(withoutPrefix)) return null;
             return '주문_' + withoutPrefix;
+        };
+
+        // 방송 탭 이름에서 날짜(예: "10/20", "10 18", "10 16")를 추출해 최신 날짜가 무조건 맨 앞(1번)에 오도록 계산하는 함수
+        const extractBroadcastDateScore = (tabName) => {
+            const s = String(tabName || '').replace(/^주문_/, '').trim();
+            if (!s) return 0;
+            const fullMatch = s.match(/(?:20)?(\d{2})[./\-\s년]+(\d{1,2})[./\-\s월]+(\d{1,2})/);
+            if (fullMatch) {
+                const yy = parseInt(fullMatch[1], 10);
+                const mm = parseInt(fullMatch[2], 10);
+                const dd = parseInt(fullMatch[3], 10);
+                if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+                    return (2000 + yy) * 10000 + mm * 100 + dd;
+                }
+            }
+            const mdMatch = s.match(/(?:^|[^\d])(1[0-2]|0?[1-9])[./\-\s월]+([0-2]?\d|3[01])(?:일|\b|\s|[^0-9])/);
+            if (mdMatch) {
+                const mm = parseInt(mdMatch[1], 10);
+                const dd = parseInt(mdMatch[2], 10);
+                return 2026 * 10000 + mm * 100 + dd;
+            }
+            return 0;
         };
 
         const pickRowField = (row, keys, fallbackIdx = -1) => {
@@ -922,9 +943,16 @@
                         rawTabs.map(toCanonicalOrderTab).filter(Boolean)
                     ));
 
-                    const reversed = [...uniqueOrderTabs].reverse();
-                    setOrderTabs(reversed);
-                    const firstTab = reversed[0] || '';
+                    // 시트 탭 위치와 무관하게 날짜 숫자가 가장 늦은(최신) 방송이 무조건 맨 앞(0번)에 오도록 정렬!
+                    const sortedByNewest = [...uniqueOrderTabs].sort((a, b) => {
+                        const scoreA = extractBroadcastDateScore(a);
+                        const scoreB = extractBroadcastDateScore(b);
+                        if (scoreA !== scoreB) return scoreB - scoreA;
+                        return 0;
+                    });
+
+                    setOrderTabs(sortedByNewest);
+                    const firstTab = sortedByNewest[0] || '';
                     setSelectedTab(firstTab);
                     if (firstTab) {
                         await loadSheetOrders(firstTab);
@@ -932,7 +960,7 @@
                         setIsLoading(false);
                     }
                     loadCsOrders();
-                    loadMasterAddresses(reversed);
+                    loadMasterAddresses(sortedByNewest);
                 } catch (e) {
                     setIsLoading(false);
                 }
