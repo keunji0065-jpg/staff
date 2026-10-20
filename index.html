@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#202124">
-    <title>강은지 직원용 시스템(v2.39)</title>
+    <title>강은지 직원용 시스템(v2.41)</title>
 
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
@@ -37,7 +37,7 @@
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
-        const APP_VERSION = "v2.39";
+        const APP_VERSION = "v2.41";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbwRdlzvE-FN9R7mMXGiVSoHXDx1dmbi-XEtviDDsCAAlFr1K1pj2lp_jTkd_pQ4tZ8v/exec';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
 
@@ -54,9 +54,22 @@
             return cleaned;
         };
 
-        // 오직 '주문_'으로 시작하는 시트만 허용
-        const isOrderBroadcastTab = (name) => {
-            return String(name || '').trim().startsWith('주문_');
+        // 시스템/기타 시트(메인주문, 시트4, 재고단가, 닉네임 등)는 제외하고 오직 '주문_' 방송 시트만 남긴 뒤 항상 '주문_방송명' 형태로 정규화
+        const EXCLUDED_SYSTEM_TABS = new Set([
+            '메인주문', '찐고객사전', '실시간재고', '고객상태관리', '방송별상품보관함',
+            '채팅기록', '교환반품CS', '재고단가', '닉네임',
+            '시트1', '시트2', '시트3', '시트4', '시트5', 'Sheet1', 'Sheet2'
+        ]);
+
+        const toCanonicalOrderTab = (name) => {
+            const s = String(name || '').trim();
+            if (!s) return null;
+            if (s.startsWith('주문_')) return s;
+            if (EXCLUDED_SYSTEM_TABS.has(s)) return null;
+            if (/^(시트|sheet)\s*\d*$/i.test(s)) return null;
+            if (s.includes('재고') || s.includes('사전') || s.includes('채팅') || s.includes('고객상태') || s.includes('교환반품') || s === '닉네임') return null;
+            // 구버전 스크립트가 앞의 '주문_'을 떼고 보냈더라도 다시 '주문_'을 붙여서 정확히 '주문_' 시트를 가리키도록 복원
+            return '주문_' + s;
         };
 
         const pickRowField = (row, keys, fallbackIdx = -1) => {
@@ -397,10 +410,18 @@
                 setIsLoading(true);
                 try {
                     const cleanBase = String(tabNameToLoad).replace(/^주문_/, '').trim();
-                    const exactTabName = '주문_' + cleanBase;
+                    const canonicalTab = '주문_' + cleanBase;
 
-                    const res = await fetchGas(`${DEFAULT_GAS_URL}?action=get_orders&masterId=${DEFAULT_MASTER_SHEET_ID}&tabName=${encodeURIComponent(exactTabName)}&broadcastName=${encodeURIComponent(cleanBase)}&t=${Date.now()}`);
-                    const rowsArray = Array.isArray(res?.data) ? res.data : (Array.isArray(res?.orders) ? res.orders : (Array.isArray(res?.rows) ? res.rows : []));
+                    // 1차 시도: '주문_방송명'으로 정확히 요청
+                    let res = await fetchGas(`${DEFAULT_GAS_URL}?action=get_orders&masterId=${DEFAULT_MASTER_SHEET_ID}&tabName=${encodeURIComponent(canonicalTab)}&broadcastName=${encodeURIComponent(cleanBase)}&t=${Date.now()}`);
+                    let rowsArray = Array.isArray(res?.data) ? res.data : (Array.isArray(res?.orders) ? res.orders : (Array.isArray(res?.rows) ? res.rows : []));
+
+                    // 2차 시도: 구버전 스크립트 호환용 (broadcastName 기준 요청)
+                    if (rowsArray.length === 0) {
+                        const res2 = await fetchGas(`${DEFAULT_GAS_URL}?action=get_orders&masterId=${DEFAULT_MASTER_SHEET_ID}&tabName=${encodeURIComponent(cleanBase)}&broadcastName=${encodeURIComponent(cleanBase)}&t=${Date.now()}`);
+                        const altRows = Array.isArray(res2?.data) ? res2.data : (Array.isArray(res2?.orders) ? res2.orders : (Array.isArray(res2?.rows) ? res2.rows : []));
+                        if (altRows.length > 0) rowsArray = altRows;
+                    }
 
                     let bName = cleanBase;
                     let fThresh = 70000;
@@ -579,24 +600,19 @@
                 setIsLoading(true);
                 try {
                     const res = await fetchGas(`${DEFAULT_GAS_URL}?action=get_order_tabs&masterId=${DEFAULT_MASTER_SHEET_ID}&t=${Date.now()}`);
-                    if (res && (res.success || res.status === 'success') && Array.isArray(res.tabs)) {
-                        // 오직 '주문_'으로 시작하는 탭만 남김
-                        const validOrderTabs = res.tabs
-                            .map(t => String(t || '').trim())
-                            .filter(t => t.startsWith('주문_'));
-                        const reversed = [...validOrderTabs].reverse();
-                        setOrderTabs(reversed);
-                        const firstTab = reversed[0] || '';
-                        setSelectedTab(firstTab);
-                        if (firstTab) {
-                            await loadSheetOrders(firstTab);
-                        } else {
-                            setCustomerGroups([]);
-                        }
-                    } else {
-                        setOrderTabs([]);
-                        setSelectedTab('');
-                        setCustomerGroups([]);
+                    const rawTabs = (res && Array.isArray(res.tabs)) ? res.tabs : [];
+
+                    // 오직 '주문_' 시트만 남기고 중복 제거 (구버전 스크립트가 '주문_'을 떼고 줬어도 '주문_...'으로 자동 복원)
+                    const uniqueOrderTabs = Array.from(new Set(
+                        rawTabs.map(toCanonicalOrderTab).filter(Boolean)
+                    ));
+
+                    const reversed = [...uniqueOrderTabs].reverse();
+                    setOrderTabs(reversed);
+                    const firstTab = reversed[0] || '';
+                    setSelectedTab(firstTab);
+                    if (firstTab) {
+                        await loadSheetOrders(firstTab);
                     }
                     await loadCsOrders();
                 } finally {
@@ -686,7 +702,7 @@
                             action: 'save_staff_sheet_orders',
                             masterId: DEFAULT_MASTER_SHEET_ID,
                             tabName: selectedTab,
-                            broadcastName: broadcastName,
+                            broadcastName: broadcastName || selectedTab.replace(/^주문_/, ''),
                             rows: rowsToSave
                         });
                         if (res && res.success) showToast(`✅ [${selectedTab.replace(/^주문_/, '')}] 시트 저장 완료!`);
@@ -998,6 +1014,8 @@
                         onClose={() => setAddrEditTarget(null)}
                         onSave={async (newAddr) => {
                             const targetNick = addrEditTarget.nick;
+                            const cleanBName = (broadcastName || selectedTab).replace(/^주문_/, '').trim();
+                            const canonicalTab = '주문_' + cleanBName;
                             updateCustomerGroup(targetNick, cur => ({
                                 ...cur,
                                 realname: newAddr.realname,
@@ -1016,11 +1034,11 @@
                                     phone: newAddr.phone,
                                     address: newAddr.address,
                                     memo: newAddr.memo,
-                                    sheetTabName: selectedTab,
-                                    broadcastName: broadcastName
+                                    sheetTabName: canonicalTab,
+                                    broadcastName: cleanBName
                                 }
                             });
-                            showToast(`'${targetNick}' 배송지가 시트와 찐고객사전에 즉시 반영되었습니다.`);
+                            showToast(`✅ '${targetNick}' 배송지가 [${canonicalTab}] 시트와 찐고객사전에 즉시 등록되었습니다!`);
                         }}
                     />
                     <CsCopySelectModal
