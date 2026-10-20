@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#202124">
-    <title>강은지 직원용 시스템(v2.61)</title>
+    <title>강은지 직원용 시스템(v2.66)</title>
 
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
@@ -13,6 +13,8 @@
     <script src="https://unpkg.com/@phosphor-icons/web" crossorigin="anonymous"></script>
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js" crossorigin="anonymous"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js" crossorigin="anonymous"></script>
 
     <style>
         @import url("https://cdn.jsdelivr.net/gh/moonspam/NanumSquareNeo/nanumsquareneo.css");
@@ -37,16 +39,91 @@
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
-        const APP_VERSION = "v2.61";
-        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbx1rWCPnPf23AFtsCgPrHwP1mpFXO_5cW6bRdRkj_pfdLmODk3z19gMXg-GLQw7ET9D/exec';
+        const APP_VERSION = "v2.66";
+        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbz5wMdAoYwgihXThXfWyVwnEVfI57HhE9MeK4K6FdtEU53s_Sr5LaM6IdlgfgwzvhBU/exec';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
         const DEFAULT_DEP_SHEET_ID = '14bx2HMd_NID3zQN-Hb0x0At2Qmti7-p1Zfx1ZadNScY';
+
+        let staffFbDb = null;
+        try {
+            const fbConfig = {
+                apiKey: "AIzaSyDgdH34cDnp2S9akHfFLYBSpHzzamHFuoc",
+                authDomain: "my-live-shop.firebaseapp.com",
+                databaseURL: "https://my-live-shop-default-rtdb.firebaseio.com",
+                projectId: "my-live-shop",
+                storageBucket: "my-live-shop.firebasestorage.app",
+                messagingSenderId: "598748133843",
+                appId: "1:598748133843:web:17c7d83321fc191f85d726"
+            };
+            if (window.firebase) {
+                if (!window.firebase.apps.length) window.firebase.initializeApp(fbConfig);
+                staffFbDb = window.firebase.database();
+            }
+        } catch (e) {}
+
+        const syncBroadcastGroupsToFirebase = (bNameRaw, groupsList, fThresh = 70000, cRate = 10) => {
+            if (!staffFbDb || !bNameRaw || !Array.isArray(groupsList)) return;
+            try {
+                const cleanB = String(bNameRaw).replace(/^주문_/, '').trim();
+                const safeBKey = cleanB.replace(/[.#$\[\]\/]/g, '_');
+                const portalCustomers = groupsList.map(g => {
+                    const cleanPh = fixPhoneNumber(g.phone || '');
+                    const pin4 = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
+                    const zipM = String(g.address || '').match(/^\((\d{5})\)\s*(.*)$/);
+                    const cardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
+                    return {
+                        sheetTabName: '주문_' + cleanB,
+                        nickname: g.nick,
+                        phoneLast4: pin4,
+                        broadcastName: cleanB,
+                        isVip: Boolean(g.isVip),
+                        freeShippingThreshold: Number(fThresh) || 70000,
+                        cardFeeRate: Number(cRate) || 10,
+                        isCard: cardStr,
+                        shipping: Number(g.shipping) || 0,
+                        depositTotal: Number(g.deposit) || 0,
+                        deposits: Array.isArray(g.deposits) ? g.deposits : [],
+                        items: (g.items || []).map((it, idx) => ({
+                            id: idx + 1,
+                            product: it.product || '',
+                            qty: Number(it.qty) || 1,
+                            price: Number(it.price) || 0,
+                            isWaitlist: Boolean(it.isWaitlist),
+                            waitlistOrder: Number(it.waitlistOrder) || 0
+                        })),
+                        address: (g.address || g.realname) ? {
+                            realname: g.realname || '',
+                            phone: cleanPh,
+                            zipcode: zipM ? zipM[1] : '',
+                            baseAddress: zipM ? zipM[2] : (g.address || ''),
+                            detailAddress: '',
+                            memo: g.memo || '',
+                            updatedAt: ''
+                        } : null,
+                        trackingNumbers: g.trackingNumber ? [g.trackingNumber] : [],
+                        isConfirmed: Boolean(g.isConfirmed)
+                    };
+                });
+                staffFbDb.ref(`ember_live_data/_portal_orders/${safeBKey}`).set({
+                    broadcastName: cleanB,
+                    updatedAt: Date.now(),
+                    customers: portalCustomers
+                }).catch(() => {});
+            } catch (e) {}
+        };
 
         const Icon = ({ name, className = "", weight = "regular", size = 15 }) => (
             <i className={`ph ph-${name} ${className}`} data-phosphor-icon-weight={weight} style={{ fontSize: size }}></i>
         );
 
         const normalizeString = (str) => String(str || '').replace(/[\s\(\)\[\]\{\}\-\_\.\,\/]/g, '').toLowerCase();
+
+        const normalizeHandleNick = (str) => {
+            if (!str) return '';
+            let s = String(str).trim().replace(/^@+/, '');
+            s = s.replace(/-[a-zA-Z0-9]{3,6}$/, '');
+            return normalizeString(s);
+        };
 
         const fixPhoneNumber = (numStr) => {
             if (!numStr) return '';
@@ -260,13 +337,19 @@
 
             const dictSuggestions = useMemo(() => {
                 if (!isOpen || !group) return [];
-                const kw = normalizeString(dictSearch || group.nick);
+                const rawSearch = dictSearch.trim();
+                // 검색창에 직접 검색어를 입력했을 때만 부분 검색을 허용하고, 기본 상태에서는 정확히 닉네임이 일치하는 경우만 표시 (엉뚱한 사람 주소 오연결 방지!)
+                if (!rawSearch) {
+                    const exactNorm = normalizeString(group.nick);
+                    return masterAddresses.filter(a => normalizeString(a.nickname) === exactNorm).slice(0, 6);
+                }
+                const kw = normalizeString(rawSearch);
                 if (!kw) return [];
                 return masterAddresses.filter(a => {
                     const nNorm = normalizeString(a.nickname);
                     const rNorm = normalizeString(a.realname);
                     const pNorm = fixPhoneNumber(a.phone);
-                    return nNorm.includes(kw) || kw.includes(nNorm) || (rNorm && (rNorm.includes(kw) || kw.includes(rNorm))) || (pNorm && pNorm.includes(kw));
+                    return nNorm.includes(kw) || (rNorm && rNorm.includes(kw)) || (pNorm && pNorm.includes(kw));
                 }).slice(0, 6);
             }, [isOpen, group, dictSearch, masterAddresses]);
 
@@ -722,6 +805,7 @@
                     setCardFeeRate(cRate);
                     const loadedGroups = Object.values(groupsMap);
                     setCustomerGroups(loadedGroups);
+                    syncBroadcastGroupsToFirebase(bName, loadedGroups, fThresh, cRate);
 
                     // 현재 방송 주문서에 등록된 모든 고객의 배송지도 즉시 통합 주소록(masterAddresses)에 자동 병합!
                     setMasterAddresses(prev => {
@@ -859,16 +943,19 @@
                             return Array.from(map.values());
                         });
 
-                        // 현재 화면에 열려있는 고객 중 주소가 비어있고 찐고객사전에 정확히 일치하는 닉네임(예: 깔로AI)이 있으면 즉시 자동 반영!
+                        // 현재 화면에 열려있는 고객 중 주소가 비어있고 찐고객사전에 일치하는 닉네임(또는 핸들 꼬리표 제외 일치)이 있으면 즉시 자동 반영!
                         const exactMap = new Map();
+                        const handleMap = new Map();
                         incoming.forEach(item => {
                             if (item.nickname && item.address) {
                                 exactMap.set(normalizeString(item.nickname), item);
+                                const hKey = normalizeHandleNick(item.nickname);
+                                if (hKey) handleMap.set(hKey, item);
                             }
                         });
                         setCustomerGroups(prevGroups => prevGroups.map(g => {
                             if (g.address) return g;
-                            const matched = exactMap.get(normalizeString(g.nick));
+                            const matched = exactMap.get(normalizeString(g.nick)) || handleMap.get(normalizeHandleNick(g.nick));
                             if (!matched) return g;
                             const cleanPh = fixPhoneNumber(matched.phone);
                             return {
@@ -887,19 +974,12 @@
             const findMasterAddressMatch = useCallback((nick) => {
                 if (!nick || masterAddresses.length === 0) return null;
                 const targetNorm = normalizeString(nick);
+                const targetHandle = normalizeHandleNick(nick);
                 if (!targetNorm) return null;
-                // 1순위: 닉네임 완전 일치
-                const exact = masterAddresses.find(a => normalizeString(a.nickname) === targetNorm);
-                if (exact) return exact;
-                // 2순위: 수령인명 일치 또는 2글자 이상 포함(유사) 일치
-                if (targetNorm.length >= 2) {
-                    return masterAddresses.find(a => {
-                        const nNorm = normalizeString(a.nickname);
-                        const rNorm = normalizeString(a.realname);
-                        return (rNorm && rNorm === targetNorm) || (nNorm.length >= 2 && (nNorm.includes(targetNorm) || targetNorm.includes(nNorm)));
-                    }) || null;
-                }
-                return null;
+                // 1순위: 100% 완전 일치, 2순위: 유튜브 핸들 꼬리표(-e4g 등) 제거 후 100% 일치
+                return masterAddresses.find(a => normalizeString(a.nickname) === targetNorm)
+                    || (targetHandle && targetHandle.length >= 2 ? masterAddresses.find(a => normalizeHandleNick(a.nickname) === targetHandle) : null)
+                    || null;
             }, [masterAddresses]);
 
             const handleApplyMasterAddressToGroup = useCallback(async (targetNick, addrEntry) => {
@@ -1083,6 +1163,7 @@
                             broadcastName: cleanBName,
                             rows: rowsToSave
                         });
+                        syncBroadcastGroupsToFirebase(cleanBName, customerGroups, freeShipThreshold, cardFeeRate);
                         if (res && res.success) showToast(`✅ [${canonicalTab}] 시트 저장 완료!`);
                         else showToast('🚨 시트 저장 실패: ' + (res?.message || ''));
                     }
