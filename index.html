@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#202124">
-    <title>강은지 직원용 시스템(v2.41)</title>
+    <title>강은지 직원용 시스템(v2.44)</title>
 
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
@@ -37,7 +37,7 @@
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
-        const APP_VERSION = "v2.41";
+        const APP_VERSION = "v2.44";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbwRdlzvE-FN9R7mMXGiVSoHXDx1dmbi-XEtviDDsCAAlFr1K1pj2lp_jTkd_pQ4tZ8v/exec';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
 
@@ -76,22 +76,33 @@
             if (!row || typeof row !== 'object') return '';
             for (let i = 0; i < keys.length; i++) {
                 const k = keys[i];
-                if (row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== '') {
+                if (row[k] !== undefined && row[k] !== null) {
                     return row[k];
                 }
             }
-            const rowKeys = Object.keys(row);
+            const rowKeys = Object.keys(row).filter(rk => !/^col_\d+$/.test(rk));
             for (let i = 0; i < keys.length; i++) {
                 const targetNorm = normalizeString(keys[i]);
                 const foundKey = rowKeys.find(rk => normalizeString(rk) === targetNorm || normalizeString(rk).includes(targetNorm));
-                if (foundKey && row[foundKey] !== undefined && row[foundKey] !== null && String(row[foundKey]).trim() !== '') {
+                if (foundKey && row[foundKey] !== undefined && row[foundKey] !== null) {
                     return row[foundKey];
                 }
             }
-            if (fallbackIdx >= 0 && row[`col_${fallbackIdx}`] !== undefined) {
+            if (rowKeys.length === 0 && fallbackIdx >= 0 && row[`col_${fallbackIdx}`] !== undefined) {
                 return row[`col_${fallbackIdx}`];
             }
             return '';
+        };
+
+        // 주소가 메모 칸에 중복으로 들어간 경우(우편번호 열이 있던 구버전 시트 호환) 자동으로 걸러내는 클리너
+        const cleanMemoText = (memoVal, addrVal) => {
+            const m = String(memoVal || '').trim();
+            const a = String(addrVal || '').trim();
+            if (!m) return '';
+            if (a && (m === a || normalizeString(m) === normalizeString(a))) return '';
+            if (a && a.length >= 6 && (a.includes(m) || m.includes(a))) return '';
+            if (/^\(\d{5}\)/.test(m)) return '';
+            return m;
         };
 
         const fetchGas = async (url, payload = null, timeoutMs = 14000) => {
@@ -487,6 +498,14 @@
                             confirmRaw = String(pickRowField(row, ['주문확인', '확인'], 15)).trim();
                             depJsonRaw = String(pickRowField(row, ['입금내역JSON', '입금내역'], 16)).trim();
                             trkRaw = String(pickRowField(row, ['송장번호', '운송장번호', '송장'], 17)).trim();
+                        }
+
+                        // 구버전 19열(우편번호 분리형) 시트여서 주소 열에 우편번호만 있고 요청사항 열에 주소가 밀려 들어간 경우 자동 보정
+                        if (/^\d{4,5}$/.test(address) && memo && memo.length > 5) {
+                            address = `(${address.padStart(5, '0')}) ${memo}`;
+                            memo = '';
+                        } else {
+                            memo = cleanMemoText(memo, address);
                         }
 
                         if (!nick || nick === '닉네임' || nick === '주문자') return;
@@ -1308,7 +1327,7 @@
 
                         {activeMainTab === 'orders' && (
                             <div className="space-y-2.5 w-full">
-                                <div className="grid grid-cols-7 gap-1.5 text-center w-full">
+                                <div className="grid grid-cols-7 gap-2 text-center w-full">
                                     {[
                                         { id: 'all', label: '전체 주문현황', val: `${stats.totalCustomers}명 (${stats.totalQty}개)`, color: 'text-slate-800' },
                                         { id: 'paid', label: '완납', val: `${stats.paidCount}명`, color: 'text-emerald-600' },
@@ -1321,12 +1340,12 @@
                                         <button
                                             key={st.id}
                                             onClick={() => setStatusFilter(st.id)}
-                                            className={`bg-white px-2 py-1.5 rounded-lg border shadow-sm transition flex items-center justify-between gap-1 min-w-0 ${
-                                                statusFilter === st.id ? 'border-blue-600 ring-1 ring-blue-600 bg-blue-50/30' : 'border-slate-200 hover:border-slate-300'
+                                            className={`bg-white px-3 py-2.5 rounded-xl border shadow-sm transition flex flex-col items-center justify-center gap-1 min-w-0 ${
+                                                statusFilter === st.id ? 'border-blue-600 ring-2 ring-blue-600/20 bg-blue-50/40' : 'border-slate-200 hover:border-slate-300'
                                             }`}
                                         >
-                                            <span className="text-[11px] text-slate-500 font-bold truncate">{st.label}</span>
-                                            <span className={`text-xs font-black shrink-0 ${st.color}`}>{st.val}</span>
+                                            <span className="text-[11.5px] text-slate-500 font-bold truncate w-full">{st.label}</span>
+                                            <span className={`text-sm font-black shrink-0 ${st.color}`}>{st.val}</span>
                                         </button>
                                     ))}
                                 </div>
@@ -1552,7 +1571,9 @@
                                                                     {g.phone}
                                                                 </span>
                                                                 <span className="text-slate-700 truncate">{g.address}</span>
-                                                                {g.memo && <span className="text-red-600 font-bold shrink-0">[{g.memo}]</span>}
+                                                                {cleanMemoText(g.memo, g.address) && (
+                                                                    <span className="text-red-600 font-bold shrink-0">[{cleanMemoText(g.memo, g.address)}]</span>
+                                                                )}
                                                             </div>
                                                         ) : (
                                                             <span className="text-red-500 font-bold text-[11px]">⚠️ 등록된 배송지가 없습니다.</span>
