@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#202124">
-    <title>강은지 직원용 시스템(v2.44)</title>
+    <title>강은지 직원용 시스템(v2.58)</title>
 
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
@@ -37,9 +37,10 @@
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
-        const APP_VERSION = "v2.44";
-        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbwRdlzvE-FN9R7mMXGiVSoHXDx1dmbi-XEtviDDsCAAlFr1K1pj2lp_jTkd_pQ4tZ8v/exec';
+        const APP_VERSION = "v2.58";
+        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbwC6u5ZjrKYmhiIOMuSxSaNRvTaiphDMIM6w2puihCkkapCpuePrKa4cj8yRfyQMKv1/exec';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
+        const DEFAULT_DEP_SHEET_ID = '14bx2HMd_NID3zQN-Hb0x0At2Qmti7-p1Zfx1ZadNScY';
 
         const Icon = ({ name, className = "", weight = "regular", size = 15 }) => (
             <i className={`ph ph-${name} ${className}`} data-phosphor-icon-weight={weight} style={{ fontSize: size }}></i>
@@ -54,29 +55,36 @@
             return cleaned;
         };
 
-        // 시스템/기타 시트(메인주문, 시트4, 재고단가, 닉네임 등)는 제외하고 오직 '주문_' 방송 시트만 남긴 뒤 항상 '주문_방송명' 형태로 정규화
-        const EXCLUDED_SYSTEM_TABS = new Set([
-            '메인주문', '찐고객사전', '실시간재고', '고객상태관리', '방송별상품보관함',
-            '채팅기록', '교환반품CS', '재고단가', '닉네임',
+        const normalizePin4 = (val) => {
+            if (val === undefined || val === null) return '';
+            const digits = String(val).replace(/[^0-9]/g, '');
+            if (!digits) return '';
+            return digits.length < 4 ? digits.padStart(4, '0') : digits.slice(-4);
+        };
+
+        const SYSTEM_EXCLUDE_TABS = new Set([
+            '찐고객사전', '실시간재고', '고객상태관리', '방송별상품보관함',
+            '채팅기록', '교환반품CS', '재고단가', '닉네임', '메인주문',
+            '주문_오늘의방송', '오늘의방송',
             '시트1', '시트2', '시트3', '시트4', '시트5', 'Sheet1', 'Sheet2'
         ]);
 
+        // v2.44에서 53명을 정상적으로 불러왔던 탭 표준화 로직 복원 (단, 슬래시 '/'가 들어간 일반 시트는 제외하여 정확히 2개 방송만 유지)
         const toCanonicalOrderTab = (name) => {
             const s = String(name || '').trim();
             if (!s) return null;
-            if (s.startsWith('주문_')) return s;
-            if (EXCLUDED_SYSTEM_TABS.has(s)) return null;
-            if (/^(시트|sheet)\s*\d*$/i.test(s)) return null;
-            if (s.includes('재고') || s.includes('사전') || s.includes('채팅') || s.includes('고객상태') || s.includes('교환반품') || s === '닉네임') return null;
-            // 구버전 스크립트가 앞의 '주문_'을 떼고 보냈더라도 다시 '주문_'을 붙여서 정확히 '주문_' 시트를 가리키도록 복원
-            return '주문_' + s;
+            if (s.includes('/')) return null; // '10/18 여성복'처럼 주문_ 시트가 아닌 별도 시트 제외
+            const withoutPrefix = s.replace(/^주문_/, '').trim();
+            if (!withoutPrefix || SYSTEM_EXCLUDE_TABS.has(s) || SYSTEM_EXCLUDE_TABS.has(withoutPrefix)) return null;
+            if (/^(시트|sheet)\d*$/i.test(withoutPrefix)) return null;
+            return '주문_' + withoutPrefix;
         };
 
         const pickRowField = (row, keys, fallbackIdx = -1) => {
             if (!row || typeof row !== 'object') return '';
             for (let i = 0; i < keys.length; i++) {
                 const k = keys[i];
-                if (row[k] !== undefined && row[k] !== null) {
+                if (row[k] !== undefined && row[k] !== null && row[k] !== '') {
                     return row[k];
                 }
             }
@@ -84,17 +92,16 @@
             for (let i = 0; i < keys.length; i++) {
                 const targetNorm = normalizeString(keys[i]);
                 const foundKey = rowKeys.find(rk => normalizeString(rk) === targetNorm || normalizeString(rk).includes(targetNorm));
-                if (foundKey && row[foundKey] !== undefined && row[foundKey] !== null) {
+                if (foundKey && row[foundKey] !== undefined && row[foundKey] !== null && row[foundKey] !== '') {
                     return row[foundKey];
                 }
             }
-            if (rowKeys.length === 0 && fallbackIdx >= 0 && row[`col_${fallbackIdx}`] !== undefined) {
+            if (fallbackIdx >= 0 && row[`col_${fallbackIdx}`] !== undefined && row[`col_${fallbackIdx}`] !== null && row[`col_${fallbackIdx}`] !== '') {
                 return row[`col_${fallbackIdx}`];
             }
             return '';
         };
 
-        // 주소가 메모 칸에 중복으로 들어간 경우(우편번호 열이 있던 구버전 시트 호환) 자동으로 걸러내는 클리너
         const cleanMemoText = (memoVal, addrVal) => {
             const m = String(memoVal || '').trim();
             const a = String(addrVal || '').trim();
@@ -105,22 +112,36 @@
             return m;
         };
 
-        const fetchGas = async (url, payload = null, timeoutMs = 14000) => {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), timeoutMs);
-            const options = { method: payload ? 'POST' : 'GET', redirect: "follow", signal: controller.signal };
-            if (payload) {
-                options.headers = { 'Content-Type': 'text/plain;charset=utf-8' };
-                options.body = JSON.stringify(payload);
-            }
+        // 구글 앱스 스크립트 Cold Start(8~12초) 동안 절대 도중에 끊기지 않도록 타임아웃을 25초로 복원하고 자동 재시도 지원
+        const fetchGas = async (url, payload = null, timeoutMs = 25000) => {
+            const attemptFetch = async () => {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), timeoutMs);
+                const options = { method: payload ? 'POST' : 'GET', redirect: "follow", signal: controller.signal };
+                if (payload) {
+                    options.headers = { 'Content-Type': 'text/plain;charset=utf-8' };
+                    options.body = JSON.stringify(payload);
+                }
+                try {
+                    const res = await fetch(url, options);
+                    clearTimeout(timer);
+                    const text = await res.text();
+                    return JSON.parse(text);
+                } catch (err) {
+                    clearTimeout(timer);
+                    throw err;
+                }
+            };
             try {
-                const res = await fetch(url, options);
-                clearTimeout(timer);
-                const text = await res.text();
-                return JSON.parse(text);
-            } catch (err) {
-                clearTimeout(timer);
-                return { status: 'error', message: err.message || '통신 실패' };
+                return await attemptFetch();
+            } catch (firstErr) {
+                // 1차 통신 실패 시 0.5초 후 즉시 1회 자동 재시도
+                try {
+                    await new Promise(r => setTimeout(r, 500));
+                    return await attemptFetch();
+                } catch (secondErr) {
+                    return { status: 'error', message: secondErr.message || '통신 실패' };
+                }
             }
         };
 
@@ -166,26 +187,67 @@
             );
         };
 
-        const AddressEditModal = ({ isOpen, group, onClose, onSave }) => {
+        const AddressEditModal = ({ isOpen, group, masterAddresses = [], onClose, onSave }) => {
             const [realname, setRealname] = useState('');
             const [phone, setPhone] = useState('');
             const [zipcode, setZipcode] = useState('');
             const [baseAddr, setBaseAddr] = useState('');
             const [detailAddr, setDetailAddr] = useState('');
             const [memo, setMemo] = useState('');
+            const [dictSearch, setDictSearch] = useState('');
+
+            const applyMasterEntry = useCallback((entry) => {
+                if (!entry) return;
+                setRealname(entry.realname || '');
+                setPhone(fixPhoneNumber(entry.phone || ''));
+                const rawAddr = String(entry.address || '').trim();
+                const zipMatch = rawAddr.match(/^\((\d{5})\)\s*(.*)$/);
+                setZipcode(zipMatch ? zipMatch[1] : '');
+                setBaseAddr(zipMatch ? zipMatch[2] : rawAddr);
+                setDetailAddr('');
+                setMemo(cleanMemoText(entry.memo || '', rawAddr));
+            }, []);
 
             useEffect(() => {
                 if (isOpen && group) {
-                    setRealname(group.realname || '');
-                    setPhone(group.phone || '');
-                    const rawAddr = String(group.address || '').trim();
-                    const zipMatch = rawAddr.match(/^\((\d{5})\)\s*(.*)$/);
-                    setZipcode(zipMatch ? zipMatch[1] : '');
-                    setBaseAddr(zipMatch ? zipMatch[2] : rawAddr);
-                    setDetailAddr('');
-                    setMemo(group.memo || '');
+                    setDictSearch('');
+                    if (group.address || group.realname || group.phone) {
+                        setRealname(group.realname || '');
+                        setPhone(group.phone || '');
+                        const rawAddr = String(group.address || '').trim();
+                        const zipMatch = rawAddr.match(/^\((\d{5})\)\s*(.*)$/);
+                        setZipcode(zipMatch ? zipMatch[1] : '');
+                        setBaseAddr(zipMatch ? zipMatch[2] : rawAddr);
+                        setDetailAddr('');
+                        setMemo(group.memo || '');
+                    } else {
+                        // 현재 주문서에 배송지가 비어있다면 찐고객사전에서 동일 닉네임이 있는지 찾아서 자동으로 먼저 채워줌!
+                        const exactMatch = masterAddresses.find(a => normalizeString(a.nickname) === normalizeString(group.nick));
+                        if (exactMatch) {
+                            applyMasterEntry(exactMatch);
+                        } else {
+                            setRealname('');
+                            setPhone('');
+                            setZipcode('');
+                            setBaseAddr('');
+                            setDetailAddr('');
+                            setMemo('');
+                        }
+                    }
                 }
-            }, [isOpen, group]);
+            }, [isOpen, group, masterAddresses, applyMasterEntry]);
+
+            const dictSuggestions = useMemo(() => {
+                if (!isOpen || !group) return [];
+                const kw = normalizeString(dictSearch || group.nick);
+                if (!kw) return [];
+                return masterAddresses.filter(a => {
+                    const nNorm = normalizeString(a.nickname);
+                    const rNorm = normalizeString(a.realname);
+                    const pNorm = fixPhoneNumber(a.phone);
+                    return nNorm.includes(kw) || kw.includes(nNorm) || (rNorm && (rNorm.includes(kw) || kw.includes(rNorm))) || (pNorm && pNorm.includes(kw));
+                }).slice(0, 6);
+            }, [isOpen, group, dictSearch, masterAddresses]);
 
             if (!isOpen || !group) return null;
 
@@ -220,14 +282,64 @@
 
             return (
                 <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-[9999]" onClick={onClose}>
-                    <div className="bg-white rounded-xl shadow-2xl p-5 w-full max-w-md mx-4" onClick={e => e.stopPropagation()}>
+                    <div className="bg-white rounded-xl shadow-2xl p-5 w-full max-w-md mx-4 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
                         <div className="flex justify-between items-center pb-3 mb-3 border-b border-slate-200">
                             <h3 className="text-sm font-extrabold text-slate-800 flex items-center gap-1.5">
                                 <Icon name="house-line" weight="fill" className="text-blue-600" />
-                                <span>'{group.nick}' 배송지 수정</span>
+                                <span>'{group.nick}' 배송지 수정 / 찐고객사전 연동</span>
                             </h3>
                             <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><Icon name="x" weight="bold" size={18}/></button>
                         </div>
+
+                        {/* 찐고객사전 주소록 검색 및 원클릭 불러오기 영역 */}
+                        <div className="mb-3.5 p-3 bg-emerald-50/70 border border-emerald-200 rounded-xl text-xs">
+                            <div className="flex items-center justify-between mb-1.5">
+                                <span className="font-extrabold text-emerald-800 flex items-center gap-1">
+                                    <Icon name="address-book" weight="fill" className="text-emerald-600" size={15} />
+                                    <span>찐고객사전 주소록에서 검색하여 채우기 ({masterAddresses.length}명)</span>
+                                </span>
+                            </div>
+                            <div className="relative mb-2">
+                                <Icon name="magnifying-glass" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-emerald-600" size={13} />
+                                <input
+                                    type="text"
+                                    value={dictSearch}
+                                    onChange={e => setDictSearch(e.target.value)}
+                                    placeholder="찐고객사전 닉네임 · 수령인 실명 · 연락처 검색..."
+                                    className="w-full pl-8 pr-7 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs font-bold outline-none focus:border-emerald-600"
+                                />
+                                {dictSearch && (
+                                    <button type="button" onClick={() => setDictSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                                        <Icon name="x-circle" weight="fill" size={13} />
+                                    </button>
+                                )}
+                            </div>
+                            {dictSuggestions.length > 0 ? (
+                                <div className="space-y-1 max-h-32 overflow-y-auto pr-0.5">
+                                    {dictSuggestions.map((item, idx) => (
+                                        <button
+                                            key={idx}
+                                            type="button"
+                                            onClick={() => applyMasterEntry(item)}
+                                            className="w-full text-left px-2.5 py-1.5 bg-white hover:bg-emerald-100/80 border border-emerald-200 rounded-lg flex flex-col gap-0.5 transition"
+                                        >
+                                            <div className="flex items-center justify-between">
+                                                <span className="font-extrabold text-slate-800">
+                                                    {item.nickname} <span className="text-emerald-700">({item.realname || '이름없음'} · {fixPhoneNumber(item.phone)})</span>
+                                                </span>
+                                                <span className="text-[10px] font-extrabold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded shrink-0">클릭시 자동입력</span>
+                                            </div>
+                                            <span className="text-[11px] text-slate-500 truncate">{item.address}</span>
+                                        </button>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="text-[11px] text-slate-400 text-center py-1">
+                                    일치하는 찐고객사전 주소가 없습니다. 위 검색창에 다른 닉네임이나 실명을 입력해 보세요.
+                                </div>
+                            )}
+                        </div>
+
                         <form onSubmit={handleSubmit} className="space-y-3 text-xs">
                             <div className="grid grid-cols-2 gap-2">
                                 <div>
@@ -280,13 +392,6 @@
 
             if (!isOpen || !group) return null;
 
-            const cycleTag = (idx, targetTag) => {
-                setItemTags(prev => ({
-                    ...prev,
-                    [idx]: prev[idx] === targetTag ? '정상' : targetTag
-                }));
-            };
-
             const selectedCount = Object.values(itemTags).filter(v => v && v !== '정상').length;
 
             const handleConfirm = () => {
@@ -300,47 +405,44 @@
 
             return (
                 <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-[9999]" onClick={onClose}>
-                    <div className="bg-white rounded-xl shadow-2xl p-5 w-full max-w-lg mx-4 flex flex-col max-h-[85vh]" onClick={e => e.stopPropagation()}>
+                    <div className="bg-white rounded-xl shadow-2xl p-5 w-full max-w-lg mx-4 flex flex-col max-h-[85vh] border border-slate-200" onClick={e => e.stopPropagation()}>
                         <div className="flex justify-between items-center pb-3 mb-3 border-b border-slate-200">
                             <h3 className="text-sm font-extrabold text-slate-800 flex items-center gap-1.5">
-                                <Icon name="arrows-left-right" weight="bold" className="text-amber-600" size={17} />
-                                <span>'{group.nick}' 교환/반품 CS 품목 선택 복사</span>
+                                <Icon name="arrows-left-right" weight="bold" className="text-blue-600" size={17} />
+                                <span>'{group.nick}' 교환/반품 CS 등록</span>
                             </h3>
                             <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><Icon name="x" weight="bold" size={18}/></button>
                         </div>
 
                         <p className="text-xs text-slate-500 mb-2.5">
-                            주문서 전체가 1개의 카드로 복사됩니다. 그중 <strong>교환이나 반품할 품목을 아래에서 지정</strong>해 주세요.
+                            주문서 전체 품목이 함께 복사됩니다. 교환 또는 반품할 품목의 상태를 선택해 주세요.
                         </p>
 
-                        <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 mb-3">
+                        <div className="flex-1 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-lg px-3 mb-3 bg-slate-50/40">
                             {(group.items || []).map((it, idx) => {
                                 const curTag = itemTags[idx] || '정상';
                                 return (
-                                    <div key={idx} className={`p-2.5 rounded-lg border flex items-center justify-between gap-2 text-xs ${
-                                        curTag === '교환' ? 'bg-amber-50 border-amber-300' :
-                                        curTag === '반품' ? 'bg-purple-50 border-purple-300' :
-                                        curTag === '불량/오배송' ? 'bg-red-50 border-red-300' : 'bg-slate-50 border-slate-200'
-                                    }`}>
-                                        <div className="flex-1 min-w-0">
-                                            <div className="font-extrabold text-slate-800 truncate">{it.product}</div>
-                                            <div className="text-[11px] text-slate-500">{it.qty}개 · {Number(it.price).toLocaleString()}원</div>
+                                    <div key={idx} className="py-2 flex items-center justify-between gap-2 text-xs">
+                                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                                            <select
+                                                value={curTag}
+                                                onChange={e => setItemTags(prev => ({ ...prev, [idx]: e.target.value }))}
+                                                className={`px-2 py-1 rounded border text-[11px] font-extrabold outline-none cursor-pointer shrink-0 ${
+                                                    curTag === '교환' ? 'bg-blue-50 text-blue-700 border-blue-300' :
+                                                    curTag === '반품' ? 'bg-rose-50 text-rose-700 border-rose-300' :
+                                                    curTag === '불량/오배송' ? 'bg-red-600 text-white border-red-700' :
+                                                    'bg-white text-slate-600 border-slate-300'
+                                                }`}
+                                            >
+                                                <option value="정상">정상유지</option>
+                                                <option value="교환">교환요청</option>
+                                                <option value="반품">반품요청</option>
+                                                <option value="불량/오배송">불량/오배송</option>
+                                            </select>
+                                            <span className="font-bold text-slate-800 truncate">{it.product}</span>
                                         </div>
-                                        <div className="flex items-center gap-1 shrink-0">
-                                            {['교환', '반품', '불량/오배송'].map(tag => (
-                                                <button
-                                                    key={tag}
-                                                    type="button"
-                                                    onClick={() => cycleTag(idx, tag)}
-                                                    className={`px-2 py-1 rounded text-[11px] font-extrabold border transition ${
-                                                        curTag === tag
-                                                            ? (tag === '교환' ? 'bg-amber-500 text-white border-amber-600' : tag === '반품' ? 'bg-purple-600 text-white border-purple-700' : 'bg-red-600 text-white border-red-700')
-                                                            : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-100'
-                                                    }`}
-                                                >
-                                                    {tag}
-                                                </button>
-                                            ))}
+                                        <div className="text-[11px] font-bold text-slate-500 shrink-0">
+                                            {it.qty}개 · {Number(it.price).toLocaleString()}원
                                         </div>
                                     </div>
                                 );
@@ -348,22 +450,22 @@
                         </div>
 
                         <div className="mb-3">
-                            <label className="block text-xs font-bold text-slate-700 mb-1">📝 CS 내용 메모 (교환 사이즈, 불량 사유, 환불 계좌 등)</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-1">CS 메모 (교환 옵션, 사유, 환불 계좌 등)</label>
                             <input
                                 type="text"
                                 value={csMemo}
                                 onChange={e => setCsMemo(e.target.value)}
                                 placeholder="예: 66사이즈로 교환 요청 / 배송비 입금대기"
-                                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-xs font-bold outline-none focus:border-amber-500"
+                                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-xs font-bold outline-none focus:border-blue-600"
                             />
                         </div>
 
                         <div className="flex gap-2">
-                            <button type="button" onClick={onClose} className="flex-1 py-2.5 bg-slate-100 text-slate-600 font-bold rounded-lg text-xs">취소</button>
+                            <button type="button" onClick={onClose} className="flex-1 py-2.5 bg-slate-100 text-slate-600 font-bold rounded-lg text-xs hover:bg-slate-200">취소</button>
                             <button
                                 type="button"
                                 onClick={handleConfirm}
-                                className="flex-1 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-extrabold rounded-lg text-xs shadow-sm"
+                                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-900 text-white font-extrabold rounded-lg text-xs shadow-sm"
                             >
                                 교환/반품 CS 탭으로 복사 ({selectedCount > 0 ? `${selectedCount}품목 지정됨` : '전체 복사'})
                             </button>
@@ -383,10 +485,18 @@
 
             const [customerGroups, setCustomerGroups] = useState([]);
             const [csGroups, setCsGroups] = useState([]);
+            const [masterAddresses, setMasterAddresses] = useState([]);
+            const [showNewNickSuggest, setShowNewNickSuggest] = useState(false);
             const [activeMainTab, setActiveMainTab] = useState('orders');
             const [statusFilter, setStatusFilter] = useState('all');
+            const [csStatusFilter, setCsStatusFilter] = useState('all');
 
-            const [searchTerm, setSearchTerm] = useState('');
+            // 1) 현재 선택된 방송 안에서 즉시 필터링하는 검색어
+            const [localSearchTerm, setLocalSearchTerm] = useState('');
+            // 2) 교환/반품 CS 누적 목록 안에서 즉시 필터링하는 검색어
+            const [csSearchTerm, setCsSearchTerm] = useState('');
+            // 3) 전체 방송 + 교환반품CS 전체를 뒤지는 통합검색어
+            const [globalKeyword, setGlobalKeyword] = useState('');
             const [globalSearchResults, setGlobalSearchResults] = useState(null);
             const [isSearchingGlobal, setIsSearchingGlobal] = useState(false);
 
@@ -417,21 +527,26 @@
             }, []);
 
             const loadSheetOrders = useCallback(async (tabNameToLoad) => {
-                if (!tabNameToLoad) return;
+                if (!tabNameToLoad) {
+                    setIsLoading(false);
+                    return;
+                }
                 setIsLoading(true);
                 try {
                     const cleanBase = String(tabNameToLoad).replace(/^주문_/, '').trim();
                     const canonicalTab = '주문_' + cleanBase;
 
-                    // 1차 시도: '주문_방송명'으로 정확히 요청
+                    // 1차: '주문_10 16 여성복' 및 '10 16 여성복' 동시 전달
                     let res = await fetchGas(`${DEFAULT_GAS_URL}?action=get_orders&masterId=${DEFAULT_MASTER_SHEET_ID}&tabName=${encodeURIComponent(canonicalTab)}&broadcastName=${encodeURIComponent(cleanBase)}&t=${Date.now()}`);
                     let rowsArray = Array.isArray(res?.data) ? res.data : (Array.isArray(res?.orders) ? res.orders : (Array.isArray(res?.rows) ? res.rows : []));
 
-                    // 2차 시도: 구버전 스크립트 호환용 (broadcastName 기준 요청)
+                    // 만약 구버전 스크립트여서 tabName='주문_...'으로 못 찾았을 경우 즉시 cleanBase('10 16 여성복')로 재시도
                     if (rowsArray.length === 0) {
-                        const res2 = await fetchGas(`${DEFAULT_GAS_URL}?action=get_orders&masterId=${DEFAULT_MASTER_SHEET_ID}&tabName=${encodeURIComponent(cleanBase)}&broadcastName=${encodeURIComponent(cleanBase)}&t=${Date.now()}`);
-                        const altRows = Array.isArray(res2?.data) ? res2.data : (Array.isArray(res2?.orders) ? res2.orders : (Array.isArray(res2?.rows) ? res2.rows : []));
-                        if (altRows.length > 0) rowsArray = altRows;
+                        const resRetry = await fetchGas(`${DEFAULT_GAS_URL}?action=get_orders&masterId=${DEFAULT_MASTER_SHEET_ID}&tabName=${encodeURIComponent(cleanBase)}&broadcastName=${encodeURIComponent(cleanBase)}&t=${Date.now()}`);
+                        const retryRows = Array.isArray(resRetry?.data) ? resRetry.data : (Array.isArray(resRetry?.orders) ? resRetry.orders : []);
+                        if (retryRows.length > 0) {
+                            rowsArray = retryRows;
+                        }
                     }
 
                     let bName = cleanBase;
@@ -450,6 +565,7 @@
                         let cardRaw = '';
                         let realname = '';
                         let phone = '';
+                        let zipcode = '';
                         let address = '';
                         let memo = '';
                         let vipRaw = '';
@@ -461,6 +577,8 @@
                         let trkRaw = '';
 
                         if (Array.isArray(row)) {
+                            // 배열 형태로 내려온 경우 (18열 vs 19열 우편번호 포함 자동 판별)
+                            const hasZipCol = row.length >= 19;
                             nick = String(row[0] || '').trim();
                             prod = String(row[1] || '').trim();
                             qtyVal = row[2];
@@ -470,16 +588,17 @@
                             cardRaw = String(row[6] || '').trim();
                             realname = String(row[7] || '').trim();
                             phone = String(row[8] || '').trim();
-                            address = String(row[9] || '').trim();
-                            memo = String(row[10] || '').trim();
-                            vipRaw = String(row[11] || '').trim();
-                            noShowRaw = String(row[12] || '').trim();
-                            waitStr = String(row[13] || '').trim();
-                            pinRaw = String(row[14] || '').trim();
-                            confirmRaw = String(row[15] || '').trim();
-                            depJsonRaw = String(row[16] || '').trim();
-                            trkRaw = String(row[17] || '').trim();
-                        } else {
+                            zipcode = hasZipCol ? String(row[9] || '').trim() : '';
+                            address = String(row[hasZipCol ? 10 : 9] || '').trim();
+                            memo = String(row[hasZipCol ? 11 : 10] || '').trim();
+                            vipRaw = String(row[hasZipCol ? 12 : 11] || '').trim();
+                            noShowRaw = String(row[hasZipCol ? 13 : 12] || '').trim();
+                            waitStr = String(row[hasZipCol ? 14 : 13] || '').trim();
+                            pinRaw = String(row[hasZipCol ? 15 : 14] || '').trim();
+                            confirmRaw = String(row[hasZipCol ? 16 : 15] || '').trim();
+                            depJsonRaw = String(row[hasZipCol ? 17 : 16] || '').trim();
+                            trkRaw = String(row[hasZipCol ? 18 : 17] || '').trim();
+                        } else if (row && typeof row === 'object') {
                             nick = String(pickRowField(row, ['닉네임', '주문자', '고객명', 'nickname', 'customer'], 0)).trim();
                             prod = String(pickRowField(row, ['상품명', '품목', '제품명', 'product', 'name'], 1)).trim();
                             qtyVal = pickRowField(row, ['수량', '개수', 'qty', 'quantity'], 2);
@@ -489,6 +608,7 @@
                             cardRaw = String(pickRowField(row, ['카드결제', '카드', 'card'], 6)).trim();
                             realname = String(pickRowField(row, ['수령인명', '수령인', '이름', '성명', 'realname'], 7)).trim();
                             phone = String(pickRowField(row, ['연락처', '전화번호', '핸드폰번호', 'phone'], 8)).trim();
+                            zipcode = String(pickRowField(row, ['우편번호', 'zipcode'])).trim();
                             address = String(pickRowField(row, ['주소', '배송지', 'address'], 9)).trim();
                             memo = String(pickRowField(row, ['요청사항', '배송메모', '메모', 'memo'], 10)).trim();
                             vipRaw = String(pickRowField(row, ['VIP여부', 'VIP'], 11)).trim();
@@ -500,16 +620,13 @@
                             trkRaw = String(pickRowField(row, ['송장번호', '운송장번호', '송장'], 17)).trim();
                         }
 
-                        // 구버전 19열(우편번호 분리형) 시트여서 주소 열에 우편번호만 있고 요청사항 열에 주소가 밀려 들어간 경우 자동 보정
-                        if (/^\d{4,5}$/.test(address) && memo && memo.length > 5) {
-                            address = `(${address.padStart(5, '0')}) ${memo}`;
-                            memo = '';
-                        } else {
-                            memo = cleanMemoText(memo, address);
+                        if (zipcode && address && !address.startsWith('(')) {
+                            address = `(${zipcode}) ${address}`;
                         }
+                        memo = cleanMemoText(memo, address);
 
                         if (!nick || nick === '닉네임' || nick === '주문자') return;
-                        if (nick === '___WORKSPACE_META___') {
+                        if (nick.startsWith('___WORKSPACE')) {
                             if (prod) bName = prod;
                             if (Number(qtyVal) > 0) fThresh = Number(qtyVal);
                             if (Number(priceVal) >= 0 && priceVal !== '') dShip = Number(priceVal);
@@ -544,12 +661,19 @@
                                 isVip: vipRaw === 'O' || vipRaw === 'true',
                                 isNoShow: noShowRaw === 'O' || noShowRaw === 'true',
                                 isConfirmed: confirmRaw === 'O' || confirmRaw === 'true',
-                                pin: String(pinRaw || '').replace(/[^0-9]/g, '').slice(-4),
+                                pin: normalizePin4(pinRaw),
                                 trackingNumber: String(trkRaw || '').replace(/^'+/, '').trim(),
                                 deposits: parsedDeposits,
                                 showDeposits: false,
                                 items: []
                             };
+                        } else {
+                            // 동일 고객의 다른 행에 수령인/주소/송장 정보가 들어있는 경우 보완
+                            if (!groupsMap[nick].realname && realname) groupsMap[nick].realname = realname;
+                            if (!groupsMap[nick].phone && phone) groupsMap[nick].phone = fixPhoneNumber(phone);
+                            if (!groupsMap[nick].address && address) groupsMap[nick].address = address;
+                            if (!groupsMap[nick].memo && memo) groupsMap[nick].memo = memo;
+                            if (!groupsMap[nick].trackingNumber && trkRaw) groupsMap[nick].trackingNumber = String(trkRaw).replace(/^'+/, '').trim();
                         }
 
                         const depNum = Number(String(depVal || '0').replace(/[^0-9.-]/g, '')) || 0;
@@ -575,7 +699,29 @@
                     setFreeShipThreshold(fThresh);
                     setDefaultShipping(dShip);
                     setCardFeeRate(cRate);
-                    setCustomerGroups(Object.values(groupsMap));
+                    const loadedGroups = Object.values(groupsMap);
+                    setCustomerGroups(loadedGroups);
+
+                    // 현재 방송 주문서에 등록된 모든 고객의 배송지도 즉시 통합 주소록(masterAddresses)에 자동 병합!
+                    setMasterAddresses(prev => {
+                        const map = new Map();
+                        prev.forEach(item => {
+                            const key = normalizeString(item.nickname || item.realname);
+                            if (key && item.address) map.set(key, item);
+                        });
+                        loadedGroups.forEach(g => {
+                            if (g.nick && g.address) {
+                                map.set(normalizeString(g.nick), {
+                                    nickname: g.nick,
+                                    realname: g.realname || '',
+                                    phone: fixPhoneNumber(g.phone || ''),
+                                    address: g.address,
+                                    memo: cleanMemoText(g.memo || '', g.address)
+                                });
+                            }
+                        });
+                        return Array.from(map.values());
+                    });
                 } catch (e) {
                     showToast('주문서 로드 중 오류가 발생했습니다.');
                 } finally {
@@ -586,34 +732,185 @@
             const loadCsOrders = useCallback(async () => {
                 try {
                     const res = await fetchGas(`${DEFAULT_GAS_URL}?action=get_cs_orders&masterId=${DEFAULT_MASTER_SHEET_ID}&t=${Date.now()}`);
-                    if (res && res.success && Array.isArray(res.data)) {
-                        const parsed = res.data.map((r, i) => {
-                            let itemsArr = [];
+                    const rows = Array.isArray(res?.data) ? res.data : [];
+                    const parsed = rows.map((r, i) => {
+                        let items = [];
+                        const jsonRaw = pickRowField(r, ['전체품목JSON', 'itemsJson'], 15);
+                        if (jsonRaw) {
                             try {
-                                if (r['전체품목JSON']) itemsArr = JSON.parse(r['전체품목JSON']);
+                                const p = JSON.parse(jsonRaw);
+                                if (Array.isArray(p)) items = p;
                             } catch (e) {}
-                            return {
-                                id: r['CS_ID'] || `cs_${Date.now()}_${i}`,
-                                createdAt: r['등록일시'] || '',
-                                sourceBroadcast: r['원본방송'] || '',
-                                csStatus: r['처리상태'] || '접수',
-                                nick: r['닉네임'] || '',
-                                realname: r['수령인명'] || '',
-                                phone: fixPhoneNumber(r['연락처'] || ''),
-                                address: r['주소'] || '',
-                                origTracking: String(r['원송장번호'] || '').replace(/^'+/, ''),
-                                csTracking: String(r['교반송장번호'] || '').replace(/^'+/, ''),
-                                csMemo: r['CS메모'] || '',
-                                shipping: Number(r['배송비']) || 0,
-                                deposit: Number(r['입금액']) || 0,
-                                cardMode: r['카드결제'] === '카드완료' ? 'completed' : (r['카드결제'] === '카드요청' ? 'requested' : 'none'),
-                                items: itemsArr
-                            };
+                        }
+                        const cardStr = String(pickRowField(r, ['카드결제', 'card'], 13)).trim();
+                        const cardMode = cardStr.includes('완료') ? 'completed' : (cardStr ? 'requested' : 'none');
+                        return {
+                            id: String(pickRowField(r, ['CS_ID', 'id'], 0) || `cs_${Date.now()}_${i}`),
+                            createdAt: String(pickRowField(r, ['등록일시', 'createdAt'], 1) || ''),
+                            sourceBroadcast: String(pickRowField(r, ['원본방송', 'sourceBroadcast'], 2) || '').replace(/^주문_/, ''),
+                            csStatus: String(pickRowField(r, ['처리상태', 'csStatus'], 3) || '접수'),
+                            nick: String(pickRowField(r, ['닉네임', 'nick'], 4) || ''),
+                            realname: String(pickRowField(r, ['수령인명', 'realname'], 5) || ''),
+                            phone: fixPhoneNumber(pickRowField(r, ['연락처', 'phone'], 6)),
+                            address: String(pickRowField(r, ['주소', 'address'], 7) || ''),
+                            origTracking: String(pickRowField(r, ['원송장번호', 'origTracking'], 8) || '').replace(/^'+/, ''),
+                            csTracking: String(pickRowField(r, ['교반송장번호', 'csTracking'], 9) || '').replace(/^'+/, ''),
+                            csMemo: String(pickRowField(r, ['CS메모', 'csMemo'], 10) || ''),
+                            shipping: Number(String(pickRowField(r, ['배송비', 'shipping'], 11) || '0').replace(/[^0-9.-]/g, '')) || 0,
+                            deposit: Number(String(pickRowField(r, ['입금액', 'deposit'], 12) || '0').replace(/[^0-9.-]/g, '')) || 0,
+                            cardMode: cardMode,
+                            items: items
+                        };
+                    }).filter(c => c.nick);
+                    setCsGroups(parsed);
+                } catch (e) {}
+            }, []);
+
+            // 찐고객사전 주소록(700명+) 로드 — 영문 헤더(nickname, realname, phone, address, zipcode, memo) 및 col_0~col_5 완벽 파싱
+            const loadMasterAddresses = useCallback(async (tabsList = []) => {
+                try {
+                    const res = await fetchGas(`${DEFAULT_GAS_URL}?action=get_all&depId=${DEFAULT_DEP_SHEET_ID}&masterId=${DEFAULT_MASTER_SHEET_ID}&skipHeavy=false&t=${Date.now()}`);
+                    const incoming = [];
+                    if (res && (res.status === 'success' || res.success) && Array.isArray(res.masterAddresses)) {
+                        res.masterAddresses.forEach(a => {
+                            let nick = '', realname = '', phone = '', address = '', zip = '', memo = '';
+                            if (Array.isArray(a)) {
+                                nick = String(a[0] || '').trim();
+                                realname = String(a[1] || '').trim();
+                                phone = fixPhoneNumber(a[2] || '');
+                                address = String(a[3] || '').trim();
+                                zip = String(a[4] || '').trim();
+                                memo = cleanMemoText(a[5] || a[4] || '', address);
+                            } else if (a && typeof a === 'object') {
+                                nick = String(pickRowField(a, ['nickname', '닉네임', '주문자', '고객명'], 0)).trim();
+                                realname = String(pickRowField(a, ['realname', '수령인명', '수령인', '이름', '성명'], 1)).trim();
+                                phone = fixPhoneNumber(pickRowField(a, ['phone', '연락처', '전화번호', '핸드폰번호'], 2));
+                                address = String(pickRowField(a, ['address', '주소', '배송지'], 3)).trim();
+                                zip = String(pickRowField(a, ['zipcode', '우편번호'], 4)).trim();
+                                const rawMemo = pickRowField(a, ['memo', '배송메모', '요청사항', '메모'], 5);
+                                memo = cleanMemoText(rawMemo, address);
+                            }
+                            // 1행 헤더 줄('nickname', 'realname') 자체는 건너뜀
+                            if (nick.toLowerCase() === 'nickname' || realname.toLowerCase() === 'realname') return;
+                            if (zip && /^\d{5}$/.test(zip) && address && !address.startsWith('(')) {
+                                address = `(${zip}) ${address}`;
+                            }
+                            if ((nick || realname) && address) {
+                                incoming.push({ nickname: nick || realname, realname, phone, address, memo });
+                            }
                         });
-                        setCsGroups(parsed);
+                    }
+
+                    // 추가로 다른 방송 시트(tabsList)에 있는 고객 주소들도 수집하여 주소록에 합산
+                    for (let i = 0; i < tabsList.length; i++) {
+                        const tName = tabsList[i];
+                        const cleanB = String(tName).replace(/^주문_/, '').trim();
+                        try {
+                            const oRes = await fetchGas(`${DEFAULT_GAS_URL}?action=get_orders&masterId=${DEFAULT_MASTER_SHEET_ID}&tabName=${encodeURIComponent('주문_' + cleanB)}&broadcastName=${encodeURIComponent(cleanB)}&t=${Date.now()}`);
+                            const rows = Array.isArray(oRes?.data) ? oRes.data : [];
+                            rows.forEach(r => {
+                                const nick = String(pickRowField(r, ['닉네임', '주문자', 'nickname'], 0)).trim();
+                                if (!nick || nick === '닉네임' || nick.startsWith('___WORKSPACE')) return;
+                                const realname = String(pickRowField(r, ['수령인명', '수령인', '이름', 'realname'], 7)).trim();
+                                const phone = fixPhoneNumber(pickRowField(r, ['연락처', '전화번호', 'phone'], 8));
+                                const zip = String(pickRowField(r, ['우편번호', 'zipcode'])).trim();
+                                let address = String(pickRowField(r, ['주소', '배송지', 'address'], 9)).trim();
+                                if (zip && address && !address.startsWith('(')) address = `(${zip}) ${address}`;
+                                const memo = cleanMemoText(pickRowField(r, ['요청사항', '배송메모', 'memo'], 10), address);
+                                if (address) {
+                                    incoming.push({ nickname: nick, realname, phone, address, memo });
+                                }
+                            });
+                        } catch (err) {}
+                    }
+
+                    if (incoming.length > 0) {
+                        setMasterAddresses(prev => {
+                            const map = new Map();
+                            prev.forEach(item => {
+                                const k = normalizeString(item.nickname || item.realname);
+                                if (k && item.address) map.set(k, item);
+                            });
+                            incoming.forEach(item => {
+                                const k = normalizeString(item.nickname || item.realname);
+                                if (k && item.address) map.set(k, item);
+                            });
+                            return Array.from(map.values());
+                        });
+
+                        // 현재 화면에 열려있는 고객 중 주소가 비어있고 찐고객사전에 정확히 일치하는 닉네임(예: 깔로AI)이 있으면 즉시 자동 반영!
+                        const exactMap = new Map();
+                        incoming.forEach(item => {
+                            if (item.nickname && item.address) {
+                                exactMap.set(normalizeString(item.nickname), item);
+                            }
+                        });
+                        setCustomerGroups(prevGroups => prevGroups.map(g => {
+                            if (g.address) return g;
+                            const matched = exactMap.get(normalizeString(g.nick));
+                            if (!matched) return g;
+                            const cleanPh = fixPhoneNumber(matched.phone);
+                            return {
+                                ...g,
+                                realname: matched.realname || g.realname,
+                                phone: cleanPh || g.phone,
+                                address: matched.address,
+                                memo: matched.memo || g.memo,
+                                pin: cleanPh.length >= 4 ? cleanPh.slice(-4) : g.pin
+                            };
+                        }));
                     }
                 } catch (e) {}
             }, []);
+
+            const findMasterAddressMatch = useCallback((nick) => {
+                if (!nick || masterAddresses.length === 0) return null;
+                const targetNorm = normalizeString(nick);
+                if (!targetNorm) return null;
+                // 1순위: 닉네임 완전 일치
+                const exact = masterAddresses.find(a => normalizeString(a.nickname) === targetNorm);
+                if (exact) return exact;
+                // 2순위: 수령인명 일치 또는 2글자 이상 포함(유사) 일치
+                if (targetNorm.length >= 2) {
+                    return masterAddresses.find(a => {
+                        const nNorm = normalizeString(a.nickname);
+                        const rNorm = normalizeString(a.realname);
+                        return (rNorm && rNorm === targetNorm) || (nNorm.length >= 2 && (nNorm.includes(targetNorm) || targetNorm.includes(nNorm)));
+                    }) || null;
+                }
+                return null;
+            }, [masterAddresses]);
+
+            const handleApplyMasterAddressToGroup = useCallback(async (targetNick, addrEntry) => {
+                if (!targetNick || !addrEntry) return;
+                const cleanBName = (broadcastName || selectedTab).replace(/^주문_/, '').trim();
+                const canonicalTab = '주문_' + cleanBName;
+                const cleanPh = fixPhoneNumber(addrEntry.phone);
+
+                setCustomerGroups(prev => prev.map(g => g.nick === targetNick ? {
+                    ...g,
+                    realname: addrEntry.realname || g.realname,
+                    phone: cleanPh || g.phone,
+                    address: addrEntry.address || g.address,
+                    memo: addrEntry.memo || g.memo,
+                    pin: cleanPh.length >= 4 ? cleanPh.slice(-4) : g.pin
+                } : g));
+
+                await fetchGas(DEFAULT_GAS_URL, {
+                    action: 'save_master_address',
+                    masterId: DEFAULT_MASTER_SHEET_ID,
+                    data: {
+                        nickname: targetNick,
+                        realname: addrEntry.realname || '',
+                        phone: cleanPh,
+                        address: addrEntry.address || '',
+                        memo: addrEntry.memo || '',
+                        sheetTabName: canonicalTab,
+                        broadcastName: cleanBName
+                    }
+                });
+                showToast(`📗 '${targetNick}' 님께 찐고객사전 배송지(${addrEntry.realname})가 즉시 연동·저장되었습니다!`);
+            }, [broadcastName, selectedTab, showToast]);
 
             const loadInitialTabs = useCallback(async () => {
                 setIsLoading(true);
@@ -621,7 +918,6 @@
                     const res = await fetchGas(`${DEFAULT_GAS_URL}?action=get_order_tabs&masterId=${DEFAULT_MASTER_SHEET_ID}&t=${Date.now()}`);
                     const rawTabs = (res && Array.isArray(res.tabs)) ? res.tabs : [];
 
-                    // 오직 '주문_' 시트만 남기고 중복 제거 (구버전 스크립트가 '주문_'을 떼고 줬어도 '주문_...'으로 자동 복원)
                     const uniqueOrderTabs = Array.from(new Set(
                         rawTabs.map(toCanonicalOrderTab).filter(Boolean)
                     ));
@@ -632,32 +928,66 @@
                     setSelectedTab(firstTab);
                     if (firstTab) {
                         await loadSheetOrders(firstTab);
+                    } else {
+                        setIsLoading(false);
                     }
-                    await loadCsOrders();
-                } finally {
+                    loadCsOrders();
+                    loadMasterAddresses(reversed);
+                } catch (e) {
                     setIsLoading(false);
                 }
-            }, [loadSheetOrders, loadCsOrders]);
+            }, [loadSheetOrders, loadCsOrders, loadMasterAddresses]);
 
             useEffect(() => {
                 loadInitialTabs();
             }, [loadInitialTabs]);
 
+            const handleGlobalSearch = async () => {
+                const kw = globalKeyword.trim();
+                if (!kw) {
+                    setGlobalSearchResults(null);
+                    return;
+                }
+                setIsSearchingGlobal(true);
+                try {
+                    const res = await fetchGas(`${DEFAULT_GAS_URL}?action=search_all_broadcasts&masterId=${DEFAULT_MASTER_SHEET_ID}&keyword=${encodeURIComponent(kw)}&t=${Date.now()}`);
+                    if (res && res.success && Array.isArray(res.results)) {
+                        setGlobalSearchResults(res.results);
+                    } else {
+                        setGlobalSearchResults([]);
+                    }
+                } catch (e) {
+                    setGlobalSearchResults([]);
+                } finally {
+                    setIsSearchingGlobal(false);
+                }
+            };
+
             const getGroupSummary = useCallback((g) => {
-                const activeItems = (g.items || []).filter(it => !it.isWaitlist);
-                const waitItems = (g.items || []).filter(it => it.isWaitlist);
-                const prodSum = activeItems.reduce((s, it) => s + (Number(it.price) || 0), 0);
-                const ship = g.isVip ? 0 : (activeItems.length > 0 ? (Number(g.shipping) || 0) : 0);
-                const baseGrand = prodSum + ship;
+                const activeItems = (g.items || []).filter(i => !i.isWaitlist);
+                const waitItems = (g.items || []).filter(i => i.isWaitlist);
+                const prodTotal = activeItems.reduce((s, i) => s + (Number(i.price) || 0), 0);
+                const prodForShip = activeItems.reduce((s, i) => s + (Number(i.price) > 0 ? Number(i.price) : 0), 0);
+
+                let ship = 0;
+                if (activeItems.length > 0 && !g.isVip) {
+                    if (g.shipping !== undefined && g.shipping !== '') {
+                        ship = Number(g.shipping);
+                    } else {
+                        ship = (freeShipThreshold > 0 && prodForShip >= freeShipThreshold) ? 0 : defaultShipping;
+                    }
+                }
+                const baseGrand = prodTotal + ship;
                 const dep = Number(g.deposit) || 0;
                 const baseBal = baseGrand - dep;
-                const isCard = g.cardMode === 'requested' || g.cardMode === 'completed';
-                const cardFee = (isCard && baseBal > 0) ? Math.round(baseBal * (cardFeeRate / 100)) : 0;
+                const feeRate = Number(cardFeeRate) > 0 ? Number(cardFeeRate) / 100 : 0.1;
+                const cardFee = (g.cardMode !== 'none' && baseBal > 0) ? Math.round(baseBal * feeRate) : 0;
                 const finalGrand = baseGrand + cardFee;
                 const finalBal = baseBal + cardFee;
-                const isPaid = activeItems.length > 0 && baseBal <= 0 && !isCard;
-                return { activeItems, waitItems, prodSum, ship, baseGrand, dep, baseBal, cardFee, finalGrand, finalBal, isPaid };
-            }, [cardFeeRate]);
+                const isPaid = activeItems.length > 0 && baseBal <= 0 && g.cardMode === 'none';
+
+                return { activeItems, waitItems, prodTotal, ship, baseGrand, dep, baseBal, cardFee, finalGrand, finalBal, isPaid };
+            }, [freeShipThreshold, defaultShipping, cardFeeRate]);
 
             const handleSaveAll = useCallback(async () => {
                 if (isSaving) return;
@@ -669,49 +999,50 @@
                             masterId: DEFAULT_MASTER_SHEET_ID,
                             items: csGroups
                         });
-                        if (res && res.success) showToast('✅ 교환/반품 CS 시트가 저장되었습니다!');
-                        else showToast('🚨 CS 저장 실패: ' + (res?.message || ''));
-                    } else if (selectedTab) {
+                        if (res && res.success) showToast('✅ 교환/반품 CS 시트 저장 완료!');
+                        else showToast('🚨 CS 시트 저장 실패');
+                    } else {
+                        const cleanBName = (broadcastName || selectedTab).replace(/^주문_/, '').trim();
+                        const canonicalTab = '주문_' + cleanBName;
                         const rowsToSave = [{
                             '닉네임': '___WORKSPACE_META___',
-                            '상품명': broadcastName || selectedTab.replace(/^주문_/, ''),
-                            '수량': freeShipThreshold,
-                            '단가(제품금액)': defaultShipping,
-                            '배송비': cardFeeRate,
+                            '상품명': cleanBName,
+                            '수량': Number(freeShipThreshold) || 70000,
+                            '단가(제품금액)': Number(defaultShipping) || 4000,
+                            '배송비': Number(cardFeeRate) || 10,
                             '입금액': 0,
-                            '카드결제': '',
-                            '수령인명': '', '연락처': '', '주소': '', '요청사항': '',
-                            'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '',
-                            '주문확인': '', '입금내역JSON': '', '송장번호': ''
+                            '카드결제': '', '수령인명': '', '연락처': '', '주소': '', '요청사항': '',
+                            'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
                         }];
 
                         customerGroups.forEach(g => {
-                            if (!g.items || g.items.length === 0) return;
-                            const cardCell = g.cardMode === 'completed' ? `카드완료(${cardFeeRate}%)` : (g.cardMode === 'requested' ? `O(${cardFeeRate}%)` : '');
+                            const sum = getGroupSummary(g);
+                            const cardStr = g.cardMode === 'completed' ? `카드완료(${cardFeeRate}%)` : (g.cardMode === 'requested' ? `O(${cardFeeRate}%)` : '');
                             const cleanPh = fixPhoneNumber(g.phone);
-                            const pinVal = g.pin || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
-                            const depJsonStr = Array.isArray(g.deposits) && g.deposits.length > 0 ? JSON.stringify(g.deposits) : '';
+                            const pinStr = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
+                            const depJson = Array.isArray(g.deposits) && g.deposits.length > 0 ? JSON.stringify(g.deposits) : '';
+                            const itemsList = (g.items && g.items.length > 0) ? g.items : [{ product: '', qty: 1, price: 0, isWaitlist: false, waitlistOrder: 0 }];
 
-                            (g.items || []).forEach((it, idx) => {
-                                const waitCell = it.isWaitlist ? (it.waitlistOrder ? `대기${it.waitlistOrder}번` : '대기1번') : '';
+                            itemsList.forEach((it, idx) => {
+                                const waitCell = it.isWaitlist ? `대기${it.waitlistOrder || 1}번` : '';
                                 rowsToSave.push({
                                     '닉네임': g.nick,
-                                    '상품명': it.product,
+                                    '상품명': it.product || '',
                                     '수량': Number(it.qty) || 1,
                                     '단가(제품금액)': Number(it.price) || 0,
-                                    '배송비': Number(g.shipping) || 0,
-                                    '입금액': idx === 0 ? (Number(g.deposit) || 0) : 0,
-                                    '카드결제': cardCell,
+                                    '배송비': sum.ship,
+                                    '입금액': idx === 0 ? sum.dep : 0,
+                                    '카드결제': cardStr,
                                     '수령인명': g.realname || '',
                                     '연락처': cleanPh ? "'" + cleanPh : '',
                                     '주소': g.address || '',
-                                    '요청사항': g.memo || '',
+                                    '요청사항': cleanMemoText(g.memo, g.address),
                                     'VIP여부': g.isVip ? 'O' : '',
                                     '노쇼여부': g.isNoShow ? 'O' : '',
                                     '대기여부': waitCell,
-                                    '비밀번호': pinVal ? "'" + pinVal : '',
+                                    '비밀번호': pinStr ? "'" + pinStr : '',
                                     '주문확인': g.isConfirmed ? 'O' : '',
-                                    '입금내역JSON': idx === 0 ? depJsonStr : '',
+                                    '입금내역JSON': idx === 0 ? depJson : '',
                                     '송장번호': g.trackingNumber ? "'" + String(g.trackingNumber).replace(/^'+/, '') : ''
                                 });
                             });
@@ -720,17 +1051,17 @@
                         const res = await fetchGas(DEFAULT_GAS_URL, {
                             action: 'save_staff_sheet_orders',
                             masterId: DEFAULT_MASTER_SHEET_ID,
-                            tabName: selectedTab,
-                            broadcastName: broadcastName || selectedTab.replace(/^주문_/, ''),
+                            tabName: canonicalTab,
+                            broadcastName: cleanBName,
                             rows: rowsToSave
                         });
-                        if (res && res.success) showToast(`✅ [${selectedTab.replace(/^주문_/, '')}] 시트 저장 완료!`);
+                        if (res && res.success) showToast(`✅ [${canonicalTab}] 시트 저장 완료!`);
                         else showToast('🚨 시트 저장 실패: ' + (res?.message || ''));
                     }
                 } finally {
                     setIsSaving(false);
                 }
-            }, [isSaving, activeMainTab, csGroups, selectedTab, broadcastName, freeShipThreshold, defaultShipping, cardFeeRate, customerGroups, showToast]);
+            }, [isSaving, activeMainTab, csGroups, selectedTab, broadcastName, freeShipThreshold, defaultShipping, cardFeeRate, customerGroups, getGroupSummary, showToast]);
 
             useEffect(() => {
                 const onKeyDown = (e) => {
@@ -757,21 +1088,39 @@
                 const unitP = Number(String(newPrice).replace(/,/g, '')) || 0;
                 const totalP = unitP * q;
 
+                const matchedDictAddr = findMasterAddressMatch(cleanN);
+
                 setCustomerGroups(prev => {
                     const idx = prev.findIndex(g => normalizeString(g.nick) === normalizeString(cleanN));
                     if (idx !== -1) {
                         const copy = [...prev];
                         copy[idx] = {
                             ...copy[idx],
+                            realname: copy[idx].realname || matchedDictAddr?.realname || '',
+                            phone: copy[idx].phone || matchedDictAddr?.phone || '',
+                            address: copy[idx].address || matchedDictAddr?.address || '',
+                            memo: copy[idx].memo || matchedDictAddr?.memo || '',
                             items: [...copy[idx].items, { id: `item_${Date.now()}`, product: cleanP, qty: q, price: totalP, isWaitlist: false, waitlistOrder: 0 }]
                         };
                         return copy;
                     }
+                    const cleanPh = matchedDictAddr ? fixPhoneNumber(matchedDictAddr.phone) : '';
                     return [{
-                        nick: cleanN, realname: '', phone: '', address: '', memo: '',
-                        shipping: defaultShipping, deposit: 0, cardMode: 'none',
-                        isVip: false, isNoShow: false, isConfirmed: false, pin: '', trackingNumber: '',
-                        deposits: [], showDeposits: false,
+                        nick: cleanN,
+                        realname: matchedDictAddr?.realname || '',
+                        phone: cleanPh,
+                        address: matchedDictAddr?.address || '',
+                        memo: matchedDictAddr?.memo || '',
+                        shipping: defaultShipping,
+                        deposit: 0,
+                        cardMode: 'none',
+                        isVip: false,
+                        isNoShow: false,
+                        isConfirmed: false,
+                        pin: cleanPh.length >= 4 ? cleanPh.slice(-4) : '',
+                        trackingNumber: '',
+                        deposits: [],
+                        showDeposits: false,
                         items: [{ id: `item_${Date.now()}`, product: cleanP, qty: q, price: totalP, isWaitlist: false, waitlistOrder: 0 }]
                     }, ...prev];
                 });
@@ -779,32 +1128,29 @@
                 setNewProd('');
                 setNewQty(1);
                 setNewPrice('');
-                showToast(`'${cleanN}' 님 주문이 추가되었습니다. (Ctrl+S로 시트에 저장하세요)`);
-            };
-
-            const handleGlobalSearch = async () => {
-                const kw = searchTerm.trim();
-                if (!kw) {
-                    setGlobalSearchResults(null);
-                    return;
-                }
-                setIsSearchingGlobal(true);
-                try {
-                    const res = await fetchGas(`${DEFAULT_GAS_URL}?action=search_all_broadcasts&masterId=${DEFAULT_MASTER_SHEET_ID}&keyword=${encodeURIComponent(kw)}&t=${Date.now()}`);
-                    if (res && res.success) {
-                        setGlobalSearchResults(res.results || []);
-                    }
-                } finally {
-                    setIsSearchingGlobal(false);
+                setShowNewNickSuggest(false);
+                if (matchedDictAddr) {
+                    showToast(`'${cleanN}' 님 주문 추가 + 📗찐고객사전 주소(${matchedDictAddr.realname})가 자동 연동되었습니다! (Ctrl+S로 저장하세요)`);
+                } else {
+                    showToast(`'${cleanN}' 님 주문이 추가되었습니다. (Ctrl+S로 시트에 저장하세요)`);
                 }
             };
 
-            const handleConfirmCopyToCs = (group, srcBroadcast, taggedItems, memoText) => {
-                const cleanSrc = String(srcBroadcast || broadcastName || selectedTab).replace(/^주문_/, '');
+            const newNickSuggestions = useMemo(() => {
+                const kw = normalizeString(newNick);
+                if (!kw) return [];
+                return masterAddresses.filter(a => {
+                    const nNorm = normalizeString(a.nickname);
+                    const rNorm = normalizeString(a.realname);
+                    return nNorm.includes(kw) || (rNorm && rNorm.includes(kw));
+                }).slice(0, 5);
+            }, [newNick, masterAddresses]);
+
+            const handleConfirmCopyToCs = (group, bName, taggedItems, csMemoText) => {
                 const newCsEntry = {
                     id: `cs_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                     createdAt: new Date().toLocaleString('ko-KR'),
-                    sourceBroadcast: cleanSrc,
+                    sourceBroadcast: (bName || selectedTab || '').replace(/^주문_/, ''),
                     csStatus: '접수',
                     nick: group.nick,
                     realname: group.realname || '',
@@ -812,7 +1158,7 @@
                     address: group.address || '',
                     origTracking: group.trackingNumber || '',
                     csTracking: '',
-                    csMemo: memoText || '',
+                    csMemo: csMemoText || '',
                     shipping: group.shipping || 0,
                     deposit: group.deposit || 0,
                     cardMode: group.cardMode || 'none',
@@ -987,7 +1333,7 @@
             }, [customerGroups, getGroupSummary]);
 
             const filteredGroups = useMemo(() => {
-                const kw = normalizeString(searchTerm);
+                const kw = normalizeString(localSearchTerm);
                 return customerGroups.filter(g => {
                     const sum = getGroupSummary(g);
                     if (statusFilter === 'paid' && !(sum.isPaid && g.cardMode === 'none')) return false;
@@ -1004,19 +1350,21 @@
                     ].join(' '));
                     return hay.includes(kw);
                 });
-            }, [customerGroups, statusFilter, searchTerm, getGroupSummary]);
+            }, [customerGroups, statusFilter, localSearchTerm, getGroupSummary]);
 
             const filteredCsGroups = useMemo(() => {
-                const kw = normalizeString(searchTerm);
-                if (!kw) return csGroups;
+                const kw = normalizeString(csSearchTerm);
                 return csGroups.filter(c => {
+                    if (csStatusFilter === 'active' && c.csStatus === '처리완료') return false;
+                    if (csStatusFilter === 'completed' && c.csStatus !== '처리완료') return false;
+                    if (!kw) return true;
                     const hay = normalizeString([
-                        c.nick, c.realname, c.phone, c.address, c.origTracking, c.csTracking, c.csMemo,
+                        c.sourceBroadcast, c.nick, c.realname, c.phone, c.address, c.origTracking, c.csTracking, c.csMemo,
                         (c.items || []).map(it => it.product).join(' ')
                     ].join(' '));
                     return hay.includes(kw);
                 });
-            }, [csGroups, searchTerm]);
+            }, [csGroups, csSearchTerm, csStatusFilter]);
 
             return (
                 <div className="h-screen flex flex-col bg-slate-100 overflow-hidden">
@@ -1030,6 +1378,7 @@
                     <AddressEditModal
                         isOpen={Boolean(addrEditTarget)}
                         group={addrEditTarget}
+                        masterAddresses={masterAddresses}
                         onClose={() => setAddrEditTarget(null)}
                         onSave={async (newAddr) => {
                             const targetNick = addrEditTarget.nick;
@@ -1043,6 +1392,11 @@
                                 memo: newAddr.memo,
                                 pin: newAddr.phone.length >= 4 ? newAddr.phone.slice(-4) : cur.pin
                             }));
+                            // 로컬 찐고객사전 캐시도 최신화
+                            setMasterAddresses(prev => {
+                                const filtered = prev.filter(a => normalizeString(a.nickname) !== normalizeString(targetNick));
+                                return [{ nickname: targetNick, realname: newAddr.realname, phone: newAddr.phone, address: newAddr.address, memo: newAddr.memo }, ...filtered];
+                            });
                             setAddrEditTarget(null);
                             await fetchGas(DEFAULT_GAS_URL, {
                                 action: 'save_master_address',
@@ -1129,37 +1483,37 @@
                             </h1>
                         </div>
 
-                        <div className="flex items-center gap-2 flex-wrap">
-                            <div className="flex items-center gap-1.5 bg-slate-100 border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs">
-                                <Icon name="folder-open" weight="fill" className="text-blue-600" />
-                                <span className="font-bold text-slate-600">이전 방송:</span>
-                                <select
-                                    value={selectedTab}
-                                    onChange={(e) => {
-                                        setSelectedTab(e.target.value);
-                                        setGlobalSearchResults(null);
-                                        loadSheetOrders(e.target.value);
-                                    }}
-                                    className="bg-transparent font-extrabold text-slate-900 outline-none cursor-pointer"
+                        <div className="flex items-center gap-2 flex-wrap flex-1 justify-end">
+                            {/* 상단 우측: 전체방송 + 교환반품CS 통합검색 */}
+                            <div className="flex items-center gap-1.5 w-full sm:w-auto sm:min-w-[320px] max-w-md">
+                                <div className="relative flex-1">
+                                    <Icon name="globe" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-indigo-500" size={14} />
+                                    <input
+                                        type="text"
+                                        value={globalKeyword}
+                                        onChange={e => { setGlobalKeyword(e.target.value); if (!e.target.value.trim()) setGlobalSearchResults(null); }}
+                                        onKeyDown={e => { if (e.key === 'Enter') handleGlobalSearch(); }}
+                                        placeholder="전체 방송 + CS 통합검색 (닉네임/수령인/송장 등)"
+                                        className="w-full pl-8 pr-7 py-1.5 bg-indigo-50/50 border border-indigo-200 rounded-lg text-xs font-bold outline-none focus:bg-white focus:border-indigo-600"
+                                    />
+                                    {globalKeyword && (
+                                        <button onClick={() => { setGlobalKeyword(''); setGlobalSearchResults(null); }} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                                            <Icon name="x-circle" weight="fill" size={14} />
+                                        </button>
+                                    )}
+                                </div>
+                                <button
+                                    onClick={handleGlobalSearch}
+                                    disabled={isSearchingGlobal}
+                                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-extrabold shrink-0 shadow-sm flex items-center gap-1"
                                 >
-                                    {orderTabs.map(tab => (
-                                        <option key={tab} value={tab}>📅 {tab.replace(/^주문_/, '')}</option>
-                                    ))}
-                                </select>
-                                <span className="text-[11px] text-slate-400">({orderTabs.length}개)</span>
+                                    <Icon name="magnifying-glass" weight="bold" />
+                                    <span>{isSearchingGlobal ? '검색중...' : '전체 통합검색'}</span>
+                                </button>
                             </div>
 
-                            {orderTabs.length > 8 && (
-                                <button
-                                    onClick={() => setCleanupModalOpen(true)}
-                                    className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300"
-                                >
-                                    🧹 시트정리
-                                </button>
-                            )}
-
                             <button
-                                onClick={() => { loadSheetOrders(selectedTab); loadCsOrders(); }}
+                                onClick={() => { loadSheetOrders(selectedTab); loadCsOrders(); loadMasterAddresses(orderTabs); }}
                                 className="px-3 py-1.5 rounded-lg text-xs font-bold bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 flex items-center gap-1"
                             >
                                 <Icon name="arrows-clockwise" weight="bold" className={isLoading ? "animate-spin text-blue-600" : ""} />
@@ -1183,13 +1537,13 @@
                                 onClick={() => { setActiveMainTab('orders'); setGlobalSearchResults(null); }}
                                 className={`px-3.5 py-1.5 rounded-md text-xs font-extrabold transition ${activeMainTab === 'orders' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
                             >
-                                📋 주문 조회 / 추가 / 수정 ({customerGroups.length}명)
+                                📋 주문 조회 ({customerGroups.length}명)
                             </button>
                             <button
                                 onClick={() => { setActiveMainTab('cs'); setGlobalSearchResults(null); }}
-                                className={`px-3.5 py-1.5 rounded-md text-xs font-extrabold transition ${activeMainTab === 'cs' ? 'bg-amber-500 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+                                className={`px-3.5 py-1.5 rounded-md text-xs font-extrabold transition ${activeMainTab === 'cs' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
                             >
-                                🔄 교환/반품 CS 관리 ({csGroups.filter(c => c.csStatus !== '처리완료').length}/{csGroups.length}건)
+                                🔄 교환/반품 CS ({csGroups.filter(c => c.csStatus !== '처리완료').length}/{csGroups.length}건)
                             </button>
                             <button
                                 onClick={() => { setActiveMainTab('tracking'); setGlobalSearchResults(null); }}
@@ -1205,41 +1559,19 @@
                             </button>
                         </div>
 
-                        <div className="flex items-center gap-1.5 flex-1 max-w-md">
-                            <div className="relative flex-1">
-                                <Icon name="magnifying-glass" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                                <input
-                                    type="text"
-                                    value={searchTerm}
-                                    onChange={e => { setSearchTerm(e.target.value); if (!e.target.value.trim()) setGlobalSearchResults(null); }}
-                                    onKeyDown={e => { if (e.key === 'Enter') handleGlobalSearch(); }}
-                                    placeholder="닉네임, 수령인, 연락처, 송장번호, 상품명 검색..."
-                                    className="w-full pl-8 pr-7 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold outline-none focus:bg-white focus:border-blue-600"
-                                />
-                                {searchTerm && (
-                                    <button onClick={() => { setSearchTerm(''); setGlobalSearchResults(null); }} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-                                        <Icon name="x-circle" weight="fill" size={14} />
-                                    </button>
-                                )}
-                            </div>
-                            <button
-                                onClick={handleGlobalSearch}
-                                disabled={isSearchingGlobal}
-                                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-extrabold shrink-0 shadow-sm flex items-center gap-1"
-                            >
-                                <Icon name="globe" weight="bold" />
-                                <span>{isSearchingGlobal ? '검색중...' : '전체방송 통합검색'}</span>
-                            </button>
+                        <div className="text-[11px] font-bold text-slate-500 hidden md:block">
+                            {activeMainTab === 'cs'
+                                ? '전 방송 누적 교환/반품 CS 통합 목록'
+                                : `현재 선택된 방송: [${selectedTab ? selectedTab.replace(/^주문_/, '') : '없음'}]`}
                         </div>
                     </div>
-                    {}
                     <main className="flex-1 overflow-y-auto p-3 sm:p-4 w-full">
                         {globalSearchResults !== null && (
                             <div className="mb-4 bg-indigo-50/90 border-2 border-indigo-300 rounded-xl p-4 shadow-sm w-full">
                                 <div className="flex items-center justify-between pb-2.5 mb-3 border-b border-indigo-200">
                                     <div className="flex items-center gap-2">
                                         <span className="bg-indigo-600 text-white text-xs font-extrabold px-2.5 py-0.5 rounded">전체방송 + 교환반품CS 통합검색</span>
-                                        <span className="text-xs font-extrabold text-indigo-900">'{searchTerm}' 검색 결과 총 {globalSearchResults.length}건</span>
+                                        <span className="text-xs font-extrabold text-indigo-900">'{globalKeyword}' 검색 결과 총 {globalSearchResults.length}건</span>
                                     </div>
                                     <button onClick={() => setGlobalSearchResults(null)} className="text-xs font-extrabold text-indigo-700 bg-white px-2.5 py-1 rounded border border-indigo-200 hover:bg-indigo-100">
                                         통합검색 닫기 ✕
@@ -1255,7 +1587,7 @@
                                                 <div className="flex items-center justify-between flex-wrap gap-2">
                                                     <div className="flex items-center gap-1.5 flex-wrap">
                                                         {res.recordType === 'CS' ? (
-                                                            <span className="bg-amber-500 text-white text-[11px] font-extrabold px-2 py-0.5 rounded">
+                                                            <span className="bg-slate-800 text-white text-[11px] font-extrabold px-2 py-0.5 rounded">
                                                                 🔄 교환/반품CS ({res.csStatus}) · 원본:{res.broadcastName}
                                                             </span>
                                                         ) : (
@@ -1271,7 +1603,7 @@
                                                             </span>
                                                         )}
                                                         {res.csTracking && (
-                                                            <span className="bg-purple-50 text-purple-700 border border-purple-200 px-2 py-0.5 rounded font-bold text-[11px]">
+                                                            <span className="bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded font-bold text-[11px]">
                                                                 🚚 교반송장: {res.csTracking}
                                                             </span>
                                                         )}
@@ -1281,7 +1613,7 @@
                                                             <>
                                                                 <button
                                                                     onClick={() => setCsCopyTarget({ group: res, broadcastName: res.broadcastName })}
-                                                                    className="px-2.5 py-1 bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 rounded font-extrabold text-[11px]"
+                                                                    className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded font-extrabold text-[11px]"
                                                                 >
                                                                     🔄 교환/반품 CS복사
                                                                 </button>
@@ -1303,7 +1635,7 @@
                                                                     setGlobalSearchResults(null);
                                                                     setActiveMainTab('cs');
                                                                 }}
-                                                                className="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded font-extrabold text-[11px]"
+                                                                className="px-2.5 py-1 bg-slate-800 hover:bg-slate-900 text-white rounded font-extrabold text-[11px]"
                                                             >
                                                                 교환/반품 CS 탭에서 보기 ➔
                                                             </button>
@@ -1317,7 +1649,7 @@
                                                         </span>
                                                     ))}
                                                 </div>
-                                                {res.csMemo && <div className="text-[11px] font-bold text-amber-800 bg-amber-50 px-2 py-1 rounded">📝 CS메모: {res.csMemo}</div>}
+                                                {res.csMemo && <div className="text-[11px] font-bold text-slate-700 bg-slate-100 px-2 py-1 rounded">📝 CS메모: {res.csMemo}</div>}
                                             </div>
                                         ))}
                                     </div>
@@ -1327,40 +1659,130 @@
 
                         {activeMainTab === 'orders' && (
                             <div className="space-y-2.5 w-full">
-                                <div className="grid grid-cols-7 gap-2 text-center w-full">
+                                {/* 주문 조회 탭 내부 상단: 방송 선택 드롭다운 + 현재 방송 내 닉네임/상품 실시간 검색바 */}
+                                <div className="bg-white px-3.5 py-2.5 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <div className="flex items-center gap-1.5 bg-blue-50/70 border border-blue-200 rounded-lg px-3 py-1.5 text-xs">
+                                            <Icon name="calendar-check" weight="fill" className="text-blue-600" size={16} />
+                                            <span className="font-extrabold text-slate-700">조회할 방송 선택:</span>
+                                            <select
+                                                value={selectedTab}
+                                                onChange={(e) => {
+                                                    setSelectedTab(e.target.value);
+                                                    setLocalSearchTerm('');
+                                                    loadSheetOrders(e.target.value);
+                                                }}
+                                                className="bg-transparent font-black text-blue-900 outline-none cursor-pointer pr-1"
+                                            >
+                                                {orderTabs.map(tab => (
+                                                    <option key={tab} value={tab}>📅 {tab.replace(/^주문_/, '')}</option>
+                                                ))}
+                                            </select>
+                                            <span className="text-[11px] font-bold text-blue-600">({orderTabs.length}개 방송)</span>
+                                        </div>
+
+                                        {orderTabs.length > 8 && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setCleanupModalOpen(true)}
+                                                className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300"
+                                            >
+                                                🧹 오래된 시트정리
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    {/* 해당 방송 안에서만 빠르게 찾는 닉네임/수령인/상품 검색창 */}
+                                    <div className="flex items-center gap-1.5 flex-1 min-w-[240px] max-w-md">
+                                        <div className="relative flex-1">
+                                            <Icon name="magnifying-glass" className="absolute left-3 top-1/2 -translate-y-1/2 text-blue-600" size={14} />
+                                            <input
+                                                type="text"
+                                                value={localSearchTerm}
+                                                onChange={e => setLocalSearchTerm(e.target.value)}
+                                                placeholder={`[${selectedTab ? selectedTab.replace(/^주문_/, '') : '현재 방송'}] 내 닉네임·수령인·연락처·상품 즉시 검색...`}
+                                                className="w-full pl-8 pr-7 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-extrabold text-slate-800 outline-none focus:bg-white focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15"
+                                            />
+                                            {localSearchTerm && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setLocalSearchTerm('')}
+                                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                                                >
+                                                    <Icon name="x-circle" weight="fill" size={14} />
+                                                </button>
+                                            )}
+                                        </div>
+                                        {localSearchTerm && (
+                                            <span className="text-xs font-extrabold text-blue-600 bg-blue-50 px-2.5 py-1.5 rounded-lg border border-blue-200 shrink-0">
+                                                검색됨: {filteredGroups.length}명
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* 1줄 대시보드 (높이 확대 + 7등분) */}
+                                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
                                     {[
-                                        { id: 'all', label: '전체 주문현황', val: `${stats.totalCustomers}명 (${stats.totalQty}개)`, color: 'text-slate-800' },
+                                        { id: 'all', label: '전체 주문현황', val: `${stats.totalCustomers}명 (${stats.totalQty}개)`, color: 'text-slate-900' },
                                         { id: 'paid', label: '완납', val: `${stats.paidCount}명`, color: 'text-emerald-600' },
                                         { id: 'unpaid', label: '미수금', val: `${stats.unpaidCount}명`, color: 'text-red-600' },
                                         { id: 'card_req', label: '카드요청', val: `${stats.cardReqCount}명`, color: 'text-amber-600' },
                                         { id: 'card_comp', label: '카드완료', val: `${stats.cardCompCount}명`, color: 'text-purple-600' },
                                         { id: 'no_addr', label: '주소미입력', val: `${stats.noAddrCount}명`, color: 'text-orange-600' },
-                                        { id: 'waitlist', label: '⏱️ 품절대기', val: `${stats.waitCount}명`, color: 'text-amber-700' }
-                                    ].map(st => (
-                                        <button
-                                            key={st.id}
-                                            onClick={() => setStatusFilter(st.id)}
-                                            className={`bg-white px-3 py-2.5 rounded-xl border shadow-sm transition flex flex-col items-center justify-center gap-1 min-w-0 ${
-                                                statusFilter === st.id ? 'border-blue-600 ring-2 ring-blue-600/20 bg-blue-50/40' : 'border-slate-200 hover:border-slate-300'
+                                        { id: 'waitlist', label: '⏱️ 품절대기', val: `${stats.waitCount}명`, color: 'text-amber-800' }
+                                    ].map(card => (
+                                        <div
+                                            key={card.id}
+                                            onClick={() => setStatusFilter(card.id)}
+                                            className={`bg-white px-3 py-2.5 rounded-xl border-2 cursor-pointer transition flex flex-col items-center justify-center text-center shadow-sm ${
+                                                statusFilter === card.id ? 'border-blue-600 ring-2 ring-blue-600/10' : 'border-slate-200 hover:border-slate-300'
                                             }`}
                                         >
-                                            <span className="text-[11.5px] text-slate-500 font-bold truncate w-full">{st.label}</span>
-                                            <span className={`text-sm font-black shrink-0 ${st.color}`}>{st.val}</span>
-                                        </button>
+                                            <span className="text-[11px] font-bold text-slate-500 whitespace-nowrap mb-0.5">{card.label}</span>
+                                            <span className={`text-sm font-black whitespace-nowrap ${card.color}`}>{card.val}</span>
+                                        </div>
                                     ))}
                                 </div>
 
-                                <form onSubmit={handleSingleAddOrder} className="bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center gap-2 text-xs">
+                                <form onSubmit={handleSingleAddOrder} className="bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center gap-2 text-xs relative">
                                     <span className="font-extrabold text-slate-700 flex items-center gap-1 shrink-0">
                                         <Icon name="plus-circle" weight="fill" className="text-blue-600" /> 단일 주문 추가:
                                     </span>
-                                    <input
-                                        type="text"
-                                        value={newNick}
-                                        onChange={e => setNewNick(e.target.value)}
-                                        placeholder="고객 닉네임"
-                                        className="w-36 border border-slate-300 rounded-lg px-2.5 py-1.5 font-bold outline-none focus:border-blue-600"
-                                    />
+                                    <div className="relative">
+                                        <input
+                                            type="text"
+                                            value={newNick}
+                                            onFocus={() => setShowNewNickSuggest(true)}
+                                            onBlur={() => setTimeout(() => setShowNewNickSuggest(false), 180)}
+                                            onChange={e => { setNewNick(e.target.value); setShowNewNickSuggest(true); }}
+                                            placeholder="닉네임 (찐고객사전 자동연동)"
+                                            className="w-44 border border-slate-300 rounded-lg px-2.5 py-1.5 font-bold outline-none focus:border-blue-600"
+                                        />
+                                        {showNewNickSuggest && newNickSuggestions.length > 0 && (
+                                            <div className="absolute left-0 top-full mt-1 w-72 bg-white border border-slate-300 rounded-xl shadow-xl z-50 overflow-hidden divide-y divide-slate-100">
+                                                <div className="px-2.5 py-1 bg-emerald-50 text-[10px] font-extrabold text-emerald-700">
+                                                    📗 찐고객사전 주소록 일치 고객 (클릭시 선택)
+                                                </div>
+                                                {newNickSuggestions.map((item, idx) => (
+                                                    <button
+                                                        key={idx}
+                                                        type="button"
+                                                        onMouseDown={() => {
+                                                            setNewNick(item.nickname);
+                                                            setShowNewNickSuggest(false);
+                                                        }}
+                                                        className="w-full text-left px-2.5 py-1.5 hover:bg-blue-50 flex flex-col gap-0.5 text-xs"
+                                                    >
+                                                        <span className="font-extrabold text-slate-800">
+                                                            {item.nickname} <span className="text-emerald-700">({item.realname} · {item.phone})</span>
+                                                        </span>
+                                                        <span className="text-[10px] text-slate-500 truncate">{item.address}</span>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
                                     <input
                                         type="text"
                                         value={newProd}
@@ -1495,7 +1917,7 @@
                                                             <button
                                                                 type="button"
                                                                 onClick={() => openModal(`'${g.nick}' 고객 포털 비밀번호(뒷4자리) 설정`, 'prompt', async (val) => {
-                                                                    const cleanP = String(val || '').replace(/[^0-9]/g, '').slice(-4);
+                                                                    const cleanP = normalizePin4(val);
                                                                     updateCustomerGroup(g.nick, cur => ({ ...cur, pin: cleanP }));
                                                                     await fetchGas(DEFAULT_GAS_URL, {
                                                                         action: 'save_customer_password',
@@ -1503,10 +1925,10 @@
                                                                         data: { nickname: g.nick, password: cleanP }
                                                                     });
                                                                     showToast('비밀번호가 변경되었습니다.');
-                                                                }, g.pin || (g.phone ? g.phone.slice(-4) : ''), '비밀번호 설정')}
+                                                                }, normalizePin4(g.pin) || (g.phone ? g.phone.slice(-4) : ''), '비밀번호 설정')}
                                                                 className="px-2 py-0.5 rounded text-[11px] font-bold bg-blue-50 border border-blue-200 text-blue-700"
                                                             >
-                                                                🔑 {g.pin || (g.phone ? g.phone.slice(-4) : '미설정')}
+                                                                🔑 {normalizePin4(g.pin) || (g.phone ? g.phone.slice(-4) : '미설정')}
                                                             </button>
 
                                                             <button
@@ -1525,9 +1947,9 @@
                                                             <button
                                                                 type="button"
                                                                 onClick={() => setCsCopyTarget({ group: g, broadcastName: broadcastName })}
-                                                                className="px-2.5 py-0.5 rounded text-[11px] font-extrabold bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 flex items-center gap-1"
+                                                                className="px-2 py-0.5 rounded text-[11px] font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 flex items-center gap-1"
                                                             >
-                                                                <Icon name="arrows-left-right" weight="bold" size={12} />
+                                                                <Icon name="arrows-left-right" weight="bold" size={12} className="text-blue-600" />
                                                                 <span>교환/반품 CS복사</span>
                                                             </button>
                                                         </div>
@@ -1575,15 +1997,31 @@
                                                                     <span className="text-red-600 font-bold shrink-0">[{cleanMemoText(g.memo, g.address)}]</span>
                                                                 )}
                                                             </div>
-                                                        ) : (
-                                                            <span className="text-red-500 font-bold text-[11px]">⚠️ 등록된 배송지가 없습니다.</span>
-                                                        )}
+                                                        ) : (() => {
+                                                            const matchedMaster = findMasterAddressMatch(g.nick);
+                                                            return (
+                                                                <div className="flex items-center gap-2 flex-wrap min-w-0 flex-1">
+                                                                    <span className="text-red-500 font-bold text-[11px] shrink-0">⚠️ 등록된 배송지가 없습니다.</span>
+                                                                    {matchedMaster && (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => handleApplyMasterAddressToGroup(g.nick, matchedMaster)}
+                                                                            className="px-2.5 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md font-extrabold text-[11px] shadow-sm flex items-center gap-1 truncate max-w-md"
+                                                                            title={`클릭 시 찐고객사전의 [${matchedMaster.realname} / ${matchedMaster.address}] 주소를 즉시 적용합니다`}
+                                                                        >
+                                                                            <Icon name="sparkle" weight="fill" size={12} />
+                                                                            <span className="truncate">📗 찐고객사전 주소 즉시적용: {matchedMaster.realname} ({matchedMaster.address})</span>
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        })()}
                                                         <button
                                                             type="button"
                                                             onClick={() => setAddrEditTarget(g)}
                                                             className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded border border-slate-300 text-[11px] font-bold shrink-0"
                                                         >
-                                                            배송지 수정
+                                                            {g.address ? '배송지 수정' : '📗 찐고객사전 검색 / 배송지 입력'}
                                                         </button>
                                                     </div>
 
@@ -1703,17 +2141,51 @@
                         )}
 
                         {activeMainTab === 'cs' && (
-                            <div className="space-y-3 w-full">
-                                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-center justify-between text-xs">
-                                    <span className="font-bold text-amber-900">
-                                        💡 주문 조회 탭에서 <strong>[교환/반품 CS복사]</strong>를 누르면 주문서 전체가 1개의 카드로 이곳에 들어오며, 품목별로 <strong>[교환 / 반품 / 불량]</strong>을 지정할 수 있습니다.
-                                    </span>
-                                    <button
-                                        onClick={handleSaveAll}
-                                        className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-extrabold rounded-lg shrink-0 shadow-sm"
-                                    >
-                                        💾 CS 시트 저장 (Ctrl+S)
-                                    </button>
+                            <div className="space-y-2.5 w-full">
+                                {/* 상단 필터 및 검색 바: 주문 조회 탭과 동일한 깔끔한 흰색 카드 디자인 */}
+                                <div className="bg-white px-3.5 py-2.5 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-2 text-xs">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="font-extrabold text-slate-700 flex items-center gap-1.5 mr-1">
+                                            <Icon name="arrows-left-right" weight="bold" className="text-blue-600" size={16} />
+                                            <span>누적 교환/반품 CS 목록</span>
+                                        </span>
+                                        <div className="flex bg-slate-100 rounded-lg p-0.5 border border-slate-200">
+                                            {[
+                                                { id: 'all', label: `전체 (${csGroups.length})` },
+                                                { id: 'active', label: `미처리 (${csGroups.filter(c => c.csStatus !== '처리완료').length})` },
+                                                { id: 'completed', label: `처리완료 (${csGroups.filter(c => c.csStatus === '처리완료').length})` }
+                                            ].map(tab => (
+                                                <button
+                                                    key={tab.id}
+                                                    type="button"
+                                                    onClick={() => setCsStatusFilter(tab.id)}
+                                                    className={`px-3 py-1 rounded-md text-[11px] font-extrabold transition ${
+                                                        csStatusFilter === tab.id ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                                                    }`}
+                                                >
+                                                    {tab.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-1.5 flex-1 min-w-[240px] max-w-md justify-end">
+                                        <div className="relative flex-1">
+                                            <Icon name="magnifying-glass" className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                                            <input
+                                                type="text"
+                                                value={csSearchTerm}
+                                                onChange={e => setCsSearchTerm(e.target.value)}
+                                                placeholder="CS 내 닉네임·수령인·원본방송·송장·상품 검색..."
+                                                className="w-full pl-8 pr-7 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-extrabold text-slate-800 outline-none focus:bg-white focus:border-blue-600"
+                                            />
+                                            {csSearchTerm && (
+                                                <button onClick={() => setCsSearchTerm('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                                                    <Icon name="x-circle" weight="fill" size={14} />
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
                                 </div>
 
                                 {filteredCsGroups.length === 0 ? (
@@ -1721,143 +2193,166 @@
                                         접수된 교환/반품 CS 내역이 없습니다.
                                     </div>
                                 ) : (
-                                    <div className="space-y-3">
+                                    <div className="space-y-2.5">
                                         {filteredCsGroups.map((cs, csIdx) => {
+                                            const isDone = cs.csStatus === '처리완료';
                                             const taggedCount = (cs.items || []).filter(x => x.csTag && x.csTag !== '정상').length;
                                             const returnRefundSum = (cs.items || []).filter(x => x.csTag === '반품').reduce((s, x) => s + (Number(x.price) || 0), 0);
 
                                             return (
-                                                <div key={cs.id || csIdx} className="bg-white rounded-xl border-2 border-amber-300 shadow-sm overflow-hidden">
-                                                    <div className="bg-amber-50/70 px-3.5 py-2 border-b border-amber-200 flex flex-wrap items-center justify-between gap-2 text-xs">
-                                                        <div className="flex items-center gap-2 flex-wrap">
+                                                <div key={cs.id || csIdx} className={`bg-white rounded-xl border-2 shadow-sm overflow-hidden ${isDone ? 'border-slate-200 opacity-85' : 'border-slate-300'}`}>
+                                                    {/* 1단 헤더: 주문 조회 카드와 동일한 깔끔한 슬레이트 톤 */}
+                                                    <div className="bg-slate-50/80 px-3.5 py-2 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+                                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                                            <span
+                                                                onClick={() => { navigator.clipboard?.writeText(cs.nick); showToast(`'${cs.nick}' 복사됨`); }}
+                                                                className="font-black text-sm text-slate-900 cursor-pointer hover:text-blue-600 flex items-center gap-1"
+                                                            >
+                                                                {cs.nick} <Icon name="copy" size={12} className="text-slate-400" />
+                                                            </span>
+
+                                                            <span className="bg-white text-slate-600 border border-slate-300 px-2 py-0.5 rounded font-bold text-[11px]">
+                                                                📅 {cs.sourceBroadcast}
+                                                            </span>
+
                                                             <select
                                                                 value={cs.csStatus || '접수'}
                                                                 onChange={e => {
                                                                     const val = e.target.value;
                                                                     setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, csStatus: val } : x));
                                                                 }}
-                                                                className={`px-2.5 py-1 rounded font-extrabold border outline-none cursor-pointer ${
+                                                                className={`px-2 py-0.5 rounded text-[11px] font-extrabold border outline-none cursor-pointer ${
                                                                     cs.csStatus === '처리완료' ? 'bg-emerald-600 text-white border-emerald-700' :
                                                                     cs.csStatus === '재발송완료' ? 'bg-blue-600 text-white border-blue-700' :
-                                                                    'bg-amber-500 text-white border-amber-600'
+                                                                    cs.csStatus === '회수중' || cs.csStatus === '입고확인' ? 'bg-slate-700 text-white border-slate-800' :
+                                                                    'bg-rose-50 text-rose-700 border-rose-300'
                                                                 }`}
                                                             >
-                                                                <option value="접수">📌 접수</option>
-                                                                <option value="회수중">🚚 회수중</option>
-                                                                <option value="입고확인">📦 입고확인</option>
-                                                                <option value="재발송완료">🚀 재발송완료</option>
-                                                                <option value="처리완료">✅ 처리완료</option>
+                                                                <option value="접수">접수 (미처리)</option>
+                                                                <option value="회수중">회수중</option>
+                                                                <option value="입고확인">입고확인</option>
+                                                                <option value="재발송완료">재발송완료</option>
+                                                                <option value="처리완료">처리완료</option>
                                                             </select>
-                                                            <span className="bg-slate-200 text-slate-700 px-2 py-0.5 rounded font-bold text-[11px]">
-                                                                원본: {cs.sourceBroadcast}
-                                                            </span>
-                                                            <span className="font-black text-sm text-slate-900">{cs.nick}</span>
-                                                            {cs.realname && <span className="text-slate-600 font-bold">({cs.realname} · {cs.phone})</span>}
-                                                            <span className="text-[11px] font-extrabold text-amber-800 bg-amber-100 px-2 py-0.5 rounded">
-                                                                전체 {(cs.items || []).length}품목 중 교반지정 {taggedCount}건
-                                                            </span>
+
+                                                            {taggedCount > 0 && (
+                                                                <span className="text-[11px] font-bold text-slate-600 bg-white border border-slate-200 px-2 py-0.5 rounded">
+                                                                    CS품목 {taggedCount}건
+                                                                </span>
+                                                            )}
                                                             {returnRefundSum > 0 && (
-                                                                <span className="text-[11px] font-extrabold text-purple-700 bg-purple-100 px-2 py-0.5 rounded">
-                                                                    반품합계: {returnRefundSum.toLocaleString()}원
+                                                                <span className="text-[11px] font-extrabold text-rose-600 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded">
+                                                                    반품액 {returnRefundSum.toLocaleString()}원
                                                                 </span>
                                                             )}
                                                         </div>
+
                                                         <div className="flex items-center gap-2">
-                                                            <span className="text-[11px] text-slate-400">{cs.createdAt}</span>
+                                                            <span className="text-[11px] text-slate-400 font-semibold">{cs.createdAt}</span>
                                                             <button
                                                                 type="button"
-                                                                onClick={() => openModal(`'${cs.nick}' CS 카드를 삭제하시겠습니까?`, 'confirm', () => {
+                                                                onClick={() => openModal(`'${cs.nick}' CS 내역을 삭제하시겠습니까?`, 'confirm', () => {
                                                                     setCsGroups(prev => prev.filter(x => x.id !== cs.id));
                                                                 })}
                                                                 className="text-slate-400 hover:text-red-600 p-1"
+                                                                title="CS 카드 삭제"
                                                             >
                                                                 <Icon name="trash" weight="bold" />
                                                             </button>
                                                         </div>
                                                     </div>
 
-                                                    <div className="divide-y divide-slate-100 px-3.5 py-1.5">
+                                                    {/* 2단 배송지 및 송장/CS메모 바: 주문 조회의 배송지 줄처럼 컴팩트하게 배치 */}
+                                                    <div className="px-3.5 py-1.5 bg-white border-b border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
+                                                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                                                            <span className="font-extrabold text-emerald-700 shrink-0">🏠 {cs.realname || '(이름없음)'}</span>
+                                                            {cs.phone && (
+                                                                <span
+                                                                    onClick={() => { navigator.clipboard?.writeText(cs.phone); showToast('연락처 복사됨'); }}
+                                                                    className="px-1.5 py-0.5 bg-slate-100 rounded text-slate-600 font-bold text-[11px] cursor-pointer shrink-0"
+                                                                >
+                                                                    {cs.phone}
+                                                                </span>
+                                                            )}
+                                                            <input
+                                                                type="text"
+                                                                value={cs.address || ''}
+                                                                onChange={e => setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, address: e.target.value } : x))}
+                                                                placeholder="수거/재발송 주소 입력"
+                                                                className="flex-1 min-w-[180px] text-slate-700 bg-transparent hover:bg-slate-50 focus:bg-slate-50 rounded px-1.5 py-0.5 outline-none font-medium truncate"
+                                                            />
+                                                        </div>
+                                                        <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                                                            {cs.origTracking && (
+                                                                <span className="px-2 py-0.5 bg-slate-100 text-slate-500 rounded text-[11px] font-bold">
+                                                                    원송장: {cs.origTracking}
+                                                                </span>
+                                                            )}
+                                                            <div className="flex items-center border border-slate-300 rounded px-2 py-0.5 bg-slate-50 focus-within:bg-white focus-within:border-blue-600">
+                                                                <span className="text-[11px] font-bold text-slate-500 mr-1.5">📦 교반송장</span>
+                                                                <input
+                                                                    type="text"
+                                                                    value={cs.csTracking || ''}
+                                                                    onChange={e => setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, csTracking: e.target.value } : x))}
+                                                                    placeholder="송장번호 입력"
+                                                                    className="w-28 bg-transparent text-[11px] font-extrabold text-slate-800 outline-none"
+                                                                />
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* 3단 품목 리스트: 버튼 4개 나열 대신 깔끔한 드롭다운 1개로 공간 절약 */}
+                                                    <div className="divide-y divide-slate-100 px-3.5 py-1">
                                                         {(cs.items || []).map((it, idx) => {
                                                             const tag = it.csTag || '정상';
+                                                            const isCsItem = tag !== '정상';
                                                             return (
-                                                                <div key={idx} className={`py-1.5 flex items-center justify-between gap-2 text-xs ${
-                                                                    tag === '교환' ? 'bg-amber-50/70 -mx-3.5 px-3.5 font-extrabold' :
-                                                                    tag === '반품' ? 'bg-purple-50/70 -mx-3.5 px-3.5 font-extrabold' :
-                                                                    tag === '불량/오배송' ? 'bg-red-50/70 -mx-3.5 px-3.5 font-extrabold' : ''
-                                                                }`}>
-                                                                    <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                                                                        {['정상', '교환', '반품', '불량/오배송'].map(tOpt => (
-                                                                            <button
-                                                                                key={tOpt}
-                                                                                type="button"
-                                                                                onClick={() => setCsGroups(prev => prev.map(x => x.id !== cs.id ? x : {
+                                                                <div key={idx} className={`py-1.5 flex items-center justify-between gap-2 text-xs ${isCsItem ? 'bg-slate-50/80 -mx-3.5 px-3.5' : ''}`}>
+                                                                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                                                                        <select
+                                                                            value={tag}
+                                                                            onChange={e => {
+                                                                                const nextTag = e.target.value;
+                                                                                setCsGroups(prev => prev.map(x => x.id !== cs.id ? x : {
                                                                                     ...x,
-                                                                                    items: x.items.map((item, i) => i === idx ? { ...item, csTag: tOpt } : item)
-                                                                                }))}
-                                                                                className={`px-2 py-0.5 rounded text-[10.5px] font-extrabold border shrink-0 ${
-                                                                                    tag === tOpt
-                                                                                        ? (tOpt === '교환' ? 'bg-amber-500 text-white border-amber-600' :
-                                                                                           tOpt === '반품' ? 'bg-purple-600 text-white border-purple-700' :
-                                                                                           tOpt === '불량/오배송' ? 'bg-red-600 text-white border-red-700' :
-                                                                                           'bg-slate-700 text-white border-slate-800')
-                                                                                        : 'bg-white text-slate-400 border-slate-200 hover:text-slate-700'
-                                                                                }`}
-                                                                            >
-                                                                                {tOpt === '정상' ? '정상유지' : tOpt}
-                                                                            </button>
-                                                                        ))}
-                                                                        <span className="truncate ml-1 text-slate-800 font-bold">{it.product}</span>
+                                                                                    items: x.items.map((item, i) => i === idx ? { ...item, csTag: nextTag } : item)
+                                                                                }));
+                                                                            }}
+                                                                            className={`px-2 py-0.5 rounded text-[11px] font-extrabold border outline-none cursor-pointer shrink-0 ${
+                                                                                tag === '교환' ? 'bg-blue-50 text-blue-700 border-blue-300' :
+                                                                                tag === '반품' ? 'bg-rose-50 text-rose-700 border-rose-300' :
+                                                                                tag === '불량/오배송' ? 'bg-red-600 text-white border-red-700' :
+                                                                                'bg-white text-slate-500 border-slate-200'
+                                                                            }`}
+                                                                        >
+                                                                            <option value="정상">정상</option>
+                                                                            <option value="교환">교환</option>
+                                                                            <option value="반품">반품</option>
+                                                                            <option value="불량/오배송">불량/오배송</option>
+                                                                        </select>
+                                                                        <span className={`truncate ${isCsItem ? 'font-extrabold text-slate-900' : 'font-semibold text-slate-500'}`}>
+                                                                            {it.product}
+                                                                        </span>
                                                                     </div>
-                                                                    <div className="flex items-center gap-2 shrink-0 text-slate-700 font-bold">
+                                                                    <div className="flex items-center gap-2 shrink-0 text-xs font-bold text-slate-700">
                                                                         <span>{it.qty}개</span>
-                                                                        <span className="w-20 text-right">{Number(it.price || 0).toLocaleString()}원</span>
+                                                                        <span className="w-20 text-right tabular-nums">{Number(it.price || 0).toLocaleString()}원</span>
                                                                     </div>
                                                                 </div>
                                                             );
                                                         })}
                                                     </div>
 
-                                                    <div className="bg-slate-50 border-t border-slate-200 px-3.5 py-2.5 grid grid-cols-1 md:grid-cols-12 gap-2 text-xs items-center">
-                                                        <div className="md:col-span-4 flex items-center gap-1.5">
-                                                            <span className="font-bold text-slate-500 shrink-0">주소:</span>
-                                                            <input
-                                                                type="text"
-                                                                value={cs.address || ''}
-                                                                onChange={e => setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, address: e.target.value } : x))}
-                                                                placeholder="수거/재발송 주소"
-                                                                className="w-full bg-white border border-slate-300 rounded px-2 py-1 font-bold outline-none focus:border-amber-500"
-                                                            />
-                                                        </div>
-                                                        <div className="md:col-span-2 flex items-center gap-1">
-                                                            <span className="font-bold text-slate-500 shrink-0">원송장:</span>
-                                                            <input
-                                                                type="text"
-                                                                value={cs.origTracking || ''}
-                                                                onChange={e => setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, origTracking: e.target.value } : x))}
-                                                                placeholder="기존 송장"
-                                                                className="w-full bg-white border border-slate-300 rounded px-2 py-1 font-bold outline-none"
-                                                            />
-                                                        </div>
-                                                        <div className="md:col-span-3 flex items-center gap-1">
-                                                            <span className="font-extrabold text-red-600 shrink-0">📦교반송장:</span>
-                                                            <input
-                                                                type="text"
-                                                                value={cs.csTracking || ''}
-                                                                onChange={e => setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, csTracking: e.target.value } : x))}
-                                                                placeholder="회수/재발송 운송장번호"
-                                                                className="w-full bg-red-50/50 border border-red-300 rounded px-2 py-1 font-extrabold text-red-700 outline-none focus:bg-white"
-                                                            />
-                                                        </div>
-                                                        <div className="md:col-span-3 flex items-center gap-1">
-                                                            <span className="font-extrabold text-blue-700 shrink-0">📝CS내용:</span>
-                                                            <input
-                                                                type="text"
-                                                                value={cs.csMemo || ''}
-                                                                onChange={e => setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, csMemo: e.target.value } : x))}
-                                                                placeholder="교환사이즈, 사유, 계좌 등"
-                                                                className="w-full bg-blue-50/50 border border-blue-300 rounded px-2 py-1 font-bold text-slate-800 outline-none focus:bg-white"
-                                                            />
-                                                        </div>
+                                                    {/* 4단 CS 메모 한 줄 바 */}
+                                                    <div className="bg-slate-50/60 border-t border-slate-100 px-3.5 py-1.5 flex items-center gap-2 text-xs">
+                                                        <span className="font-extrabold text-slate-600 shrink-0">📝 CS 메모:</span>
+                                                        <input
+                                                            type="text"
+                                                            value={cs.csMemo || ''}
+                                                            onChange={e => setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, csMemo: e.target.value } : x))}
+                                                            placeholder="교환 사이즈, 불량 사유, 환불 계좌 등 메모 입력 (입력 후 Ctrl+S 저장)"
+                                                            className="flex-1 bg-white border border-slate-200 rounded px-2.5 py-1 text-xs font-bold text-slate-800 outline-none focus:border-blue-600"
+                                                        />
                                                     </div>
                                                 </div>
                                             );
