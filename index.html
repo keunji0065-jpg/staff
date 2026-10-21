@@ -40,10 +40,10 @@
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 279; // 279 => v2.79, 299 => v2.99, 300 => v3.00
+        const VERSION_STEP = 281; // 281 => v2.81, 299 => v2.99, 300 => v3.00
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.22";
-        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzQiXNFeSrZGH8TPvDHoaSaEV5Wg3KVy-WaMp62ssPNHkec-XojgxDGII2oYQD_iVKZ/exec';
+        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbyauz2IJXVC8dyuYy11wMJiB7xrXkh_rRCJ-u4QPHWHFxL4gEZeg-QK2S4-4EURNyIA/exec';
         const DEFAULT_STAFF_SHEET_ID = '1sM5bkDqEjD6Kpxu2yoJe2aiMuqpcWLMAIGpY3iL5_x8';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
         const DEFAULT_DEP_SHEET_ID = '14bx2HMd_NID3zQN-Hb0x0At2Qmti7-p1Zfx1ZadNScY';
@@ -1877,18 +1877,20 @@
                                 }
                             });
 
-                        // ✨ 핵심: '주문_10/20 악세사리', '주문_주문' 같은 불필요한 새 시트가 생기지 않도록 broadcastName을 '오늘의방송'으로 보내 단일 통합 시트('메인주문')만 업데이트하고, 기존에 잘못 생겼던 중복 시트들은 자동으로 삭제 정리합니다!
+                        // ✨ 핵심: '주문_10/20 악세사리', '주문_주문' 같은 불필요한 새 시트가 생기지 않도록 targetSheetName을 '주문'으로 고정하여 단일 통합 시트('주문')만 업데이트하고, 기존에 잘못 생겼던 중복 시트들은 자동으로 삭제 정리합니다!
                         const [res] = await Promise.all([
                             fetchGas(activeGasUrl, {
                                 action: 'save_orders',
                                 masterId: activeStaffSheetId,
+                                targetSheetName: '주문',
+                                onlyMainOrder: true,
                                 broadcastName: '오늘의방송',
                                 data: allCombinedRows
                             }),
                             fetchGas(activeGasUrl, {
                                 action: 'delete_old_order_tabs',
                                 masterId: activeStaffSheetId,
-                                tabNames: ['주문_주문', '주문_10/20 악세사리', '주문_10/18 여성복', '주문_10/16 여성복', '주문_10/20 모이사', '주문_10/18 혜자집']
+                                tabNames: ['주문_주문', '주문_10/20 악세사리', '주문_10/18 여성복', '주문_10/16 여성복', '주문_10/20 모이사', '주문_10/18 혜자집', '메인주문']
                             }).catch(() => null)
                         ]);
 
