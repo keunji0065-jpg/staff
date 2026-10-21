@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#202124">
-    <title>강은지 직원용 시스템(v2.66)</title>
+    <title>엠버 직원용 시스템(v2.67)</title>
 
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
@@ -39,7 +39,7 @@
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
-        const APP_VERSION = "v2.66";
+        const APP_VERSION = "v2.67";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbz5wMdAoYwgihXThXfWyVwnEVfI57HhE9MeK4K6FdtEU53s_Sr5LaM6IdlgfgwzvhBU/exec';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
         const DEFAULT_DEP_SHEET_ID = '14bx2HMd_NID3zQN-Hb0x0At2Qmti7-p1Zfx1ZadNScY';
@@ -61,7 +61,7 @@
             }
         } catch (e) {}
 
-        const syncBroadcastGroupsToFirebase = (bNameRaw, groupsList, fThresh = 70000, cRate = 10) => {
+        const syncBroadcastGroupsToFirebase = (bNameRaw, groupsList, fThresh = 70000, cRate = 10, creditsMap = {}, sourceRole = 'staff') => {
             if (!staffFbDb || !bNameRaw || !Array.isArray(groupsList)) return;
             try {
                 const cleanB = String(bNameRaw).replace(/^주문_/, '').trim();
@@ -71,12 +71,15 @@
                     const pin4 = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
                     const zipM = String(g.address || '').match(/^\((\d{5})\)\s*(.*)$/);
                     const cardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
+                    const custCred = Number(creditsMap?.[g.nick] ?? g.credit ?? 0) || 0;
                     return {
                         sheetTabName: '주문_' + cleanB,
                         nickname: g.nick,
                         phoneLast4: pin4,
                         broadcastName: cleanB,
                         isVip: Boolean(g.isVip),
+                        isNoShow: Boolean(g.isNoShow),
+                        credit: custCred,
                         freeShippingThreshold: Number(fThresh) || 70000,
                         cardFeeRate: Number(cRate) || 10,
                         isCard: cardStr,
@@ -107,6 +110,7 @@
                 staffFbDb.ref(`ember_live_data/_portal_orders/${safeBKey}`).set({
                     broadcastName: cleanB,
                     updatedAt: Date.now(),
+                    updatedBy: sourceRole,
                     customers: portalCustomers
                 }).catch(() => {});
             } catch (e) {}
@@ -120,8 +124,8 @@
 
         const normalizeHandleNick = (str) => {
             if (!str) return '';
-            let s = String(str).trim().replace(/^@+/, '');
-            s = s.replace(/-[a-zA-Z0-9]{3,6}$/, '');
+            let s = String(str).trim();
+            s = s.replace(/-[a-zA-Z0-9]{2,8}$/, '');
             return normalizeString(s);
         };
 
@@ -590,6 +594,7 @@
             const [customerGroups, setCustomerGroups] = useState([]);
             const [csGroups, setCsGroups] = useState([]);
             const [masterAddresses, setMasterAddresses] = useState([]);
+            const [customerCredits, setCustomerCredits] = useState({});
             const [showNewNickSuggest, setShowNewNickSuggest] = useState(false);
             const [activeMainTab, setActiveMainTab] = useState('orders');
             const [statusFilter, setStatusFilter] = useState('all');
@@ -805,40 +810,46 @@
                     setCardFeeRate(cRate);
                     const loadedGroups = Object.values(groupsMap);
                     setCustomerGroups(loadedGroups);
-                    syncBroadcastGroupsToFirebase(bName, loadedGroups, fThresh, cRate);
+                    syncBroadcastGroupsToFirebase(bName, loadedGroups, fThresh, cRate, customerCredits, 'init');
 
-                    // 현재 방송 주문서에 등록된 모든 고객의 배송지도 즉시 통합 주소록(masterAddresses)에 자동 병합!
-                    setMasterAddresses(prev => {
-                        const map = new Map();
-                        prev.forEach(item => {
-                            const key = normalizeString(item.nickname || item.realname);
-                            if (key && item.address) map.set(key, item);
-                        });
-                        loadedGroups.forEach(g => {
-                            if (g.nick && g.address) {
-                                map.set(normalizeString(g.nick), {
-                                    nickname: g.nick,
-                                    realname: g.realname || '',
-                                    phone: fixPhoneNumber(g.phone || ''),
-                                    address: g.address,
-                                    memo: cleanMemoText(g.memo || '', g.address)
-                                });
-                            }
-                        });
-                        return Array.from(map.values());
-                    });
+                    // Firebase에 이 방송 전용으로 고객이 방금 변경한 주소가 있다면 즉시 덮어쓰기 반영
+                    if (staffFbDb && bName) {
+                        const safeBKey = String(bName).replace(/^주문_/, '').trim().replace(/[.#$\[\]\/]/g, '_');
+                        staffFbDb.ref(`ember_live_data/_portal_broadcast_addresses/${safeBKey}`).once('value').then(snap => {
+                            const bAddrs = snap.val();
+                            if (!bAddrs || typeof bAddrs !== 'object') return;
+                            const list = Object.values(bAddrs).filter(a => a && a.nickname && a.address);
+                            if (list.length === 0) return;
+                            setCustomerGroups(prev => prev.map(g => {
+                                const matched = list.find(a =>
+                                    normalizeString(a.nickname) === normalizeString(g.nick) ||
+                                    (normalizeHandleNick(a.nickname) && normalizeHandleNick(a.nickname) === normalizeHandleNick(g.nick))
+                                );
+                                if (!matched) return g;
+                                const cleanPh = fixPhoneNumber(matched.phone || '');
+                                return {
+                                    ...g,
+                                    realname: matched.realname || g.realname,
+                                    phone: cleanPh || g.phone,
+                                    address: matched.address || g.address,
+                                    memo: cleanMemoText(matched.memo || '', matched.address) || g.memo,
+                                    pin: cleanPh.length >= 4 ? cleanPh.slice(-4) : g.pin
+                                };
+                            }));
+                        }).catch(() => {});
+                    }
                 } catch (e) {
                     showToast('주문서 로드 중 오류가 발생했습니다.');
                 } finally {
                     setIsLoading(false);
                 }
-            }, [showToast]);
+            }, [showToast, customerCredits]);
 
             const loadCsOrders = useCallback(async () => {
                 try {
                     const res = await fetchGas(`${DEFAULT_GAS_URL}?action=get_cs_orders&masterId=${DEFAULT_MASTER_SHEET_ID}&t=${Date.now()}`);
-                    const rows = Array.isArray(res?.data) ? res.data : [];
-                    const parsed = rows.map((r, i) => {
+                    const rawList = Array.isArray(res?.data) ? res.data : [];
+                    const parsed = rawList.map((r, i) => {
                         let items = [];
                         const jsonRaw = pickRowField(r, ['전체품목JSON', 'itemsJson'], 15);
                         if (jsonRaw) {
@@ -906,27 +917,16 @@
                         });
                     }
 
-                    // 추가로 다른 방송 시트(tabsList)에 있는 고객 주소들도 수집하여 주소록에 합산
-                    for (let i = 0; i < tabsList.length; i++) {
-                        const tName = tabsList[i];
-                        const cleanB = String(tName).replace(/^주문_/, '').trim();
-                        try {
-                            const oRes = await fetchGas(`${DEFAULT_GAS_URL}?action=get_orders&masterId=${DEFAULT_MASTER_SHEET_ID}&tabName=${encodeURIComponent('주문_' + cleanB)}&broadcastName=${encodeURIComponent(cleanB)}&t=${Date.now()}`);
-                            const rows = Array.isArray(oRes?.data) ? oRes.data : [];
-                            rows.forEach(r => {
-                                const nick = String(pickRowField(r, ['닉네임', '주문자', 'nickname'], 0)).trim();
-                                if (!nick || nick === '닉네임' || nick.startsWith('___WORKSPACE')) return;
-                                const realname = String(pickRowField(r, ['수령인명', '수령인', '이름', 'realname'], 7)).trim();
-                                const phone = fixPhoneNumber(pickRowField(r, ['연락처', '전화번호', 'phone'], 8));
-                                const zip = String(pickRowField(r, ['우편번호', 'zipcode'])).trim();
-                                let address = String(pickRowField(r, ['주소', '배송지', 'address'], 9)).trim();
-                                if (zip && address && !address.startsWith('(')) address = `(${zip}) ${address}`;
-                                const memo = cleanMemoText(pickRowField(r, ['요청사항', '배송메모', 'memo'], 10), address);
-                                if (address) {
-                                    incoming.push({ nickname: nick, realname, phone, address, memo });
-                                }
-                            });
-                        } catch (err) {}
+                    if (res && Array.isArray(res.customerDb)) {
+                        const sheetCredits = {};
+                        res.customerDb.forEach(c => {
+                            const n = String(c['닉네임'] || '').trim();
+                            const cred = Number(String(c['적립금'] || '0').replace(/[^0-9.-]/g, '')) || 0;
+                            if (n && cred > 0) sheetCredits[n] = cred;
+                        });
+                        if (Object.keys(sheetCredits).length > 0) {
+                            setCustomerCredits(prev => ({ ...sheetCredits, ...prev }));
+                        }
                     }
 
                     if (incoming.length > 0) {
@@ -936,6 +936,7 @@
                                 const k = normalizeString(item.nickname || item.realname);
                                 if (k && item.address) map.set(k, item);
                             });
+                            // 찐고객사전 시트의 주소를 최우선으로 등록
                             incoming.forEach(item => {
                                 const k = normalizeString(item.nickname || item.realname);
                                 if (k && item.address) map.set(k, item);
@@ -988,14 +989,30 @@
                 const canonicalTab = '주문_' + cleanBName;
                 const cleanPh = fixPhoneNumber(addrEntry.phone);
 
-                setCustomerGroups(prev => prev.map(g => g.nick === targetNick ? {
-                    ...g,
-                    realname: addrEntry.realname || g.realname,
-                    phone: cleanPh || g.phone,
-                    address: addrEntry.address || g.address,
-                    memo: addrEntry.memo || g.memo,
-                    pin: cleanPh.length >= 4 ? cleanPh.slice(-4) : g.pin
-                } : g));
+                setCustomerGroups(prev => {
+                    const nextGroups = prev.map(g => g.nick === targetNick ? {
+                        ...g,
+                        realname: addrEntry.realname || g.realname,
+                        phone: cleanPh || g.phone,
+                        address: addrEntry.address || g.address,
+                        memo: addrEntry.memo || g.memo,
+                        pin: cleanPh.length >= 4 ? cleanPh.slice(-4) : g.pin
+                    } : g);
+                    syncBroadcastGroupsToFirebase(cleanBName, nextGroups, freeShipThreshold, cardFeeRate, customerCredits, 'staff');
+                    return nextGroups;
+                });
+
+                if (staffFbDb) {
+                    const safeNickKey = String(targetNick || '').replace(/[.#$\[\]\/]/g, '_');
+                    staffFbDb.ref(`ember_live_data/_portal_addresses/${safeNickKey}`).set({
+                        nickname: targetNick,
+                        realname: addrEntry.realname || '',
+                        phone: cleanPh,
+                        address: addrEntry.address || '',
+                        memo: addrEntry.memo || '',
+                        updatedAt: new Date().toISOString()
+                    }).catch(() => {});
+                }
 
                 await fetchGas(DEFAULT_GAS_URL, {
                     action: 'save_master_address',
@@ -1011,7 +1028,7 @@
                     }
                 });
                 showToast(`📗 '${targetNick}' 님께 찐고객사전 배송지(${addrEntry.realname})가 즉시 연동·저장되었습니다!`);
-            }, [broadcastName, selectedTab, showToast]);
+            }, [broadcastName, selectedTab, freeShipThreshold, cardFeeRate, customerCredits, showToast]);
 
             const loadInitialTabs = useCallback(async () => {
                 setIsLoading(true);
@@ -1048,7 +1065,126 @@
 
             useEffect(() => {
                 loadInitialTabs();
-            }, [loadInitialTabs]);
+                if (staffFbDb) {
+                    const credRef = staffFbDb.ref('ember_live_data/_portal_credits');
+                    const portalAddrRef = staffFbDb.ref('ember_live_data/_portal_addresses');
+                    const portalConfRef = staffFbDb.ref('ember_live_data/_portal_confirmed');
+                    const cleanCurBForRef = String(broadcastName || selectedTab || '').replace(/^주문_/, '').trim();
+                    const safeCurBKey = cleanCurBForRef ? cleanCurBForRef.replace(/[.#$\[\]\/]/g, '_') : '';
+                    const portalBcastAddrRef = safeCurBKey ? staffFbDb.ref(`ember_live_data/_portal_broadcast_addresses/${safeCurBKey}`) : null;
+
+                    const onCred = (snap) => {
+                        const val = snap.val();
+                        if (!val || typeof val !== 'object') return;
+                        const next = {};
+                        Object.values(val).forEach(c => {
+                            if (c && c.nickname && Number(c.credit) >= 0) {
+                                next[c.nickname] = Number(c.credit);
+                            }
+                        });
+                        setCustomerCredits(next);
+                    };
+
+                    const onPortalAddr = (snap) => {
+                        const val = snap.val();
+                        if (!val || typeof val !== 'object') return;
+                        const cleanCurB = String(broadcastName || selectedTab || '').replace(/^주문_/, '').trim();
+                        // 현재 직원 화면에 선택된 방송과 일치하는 배송지 변경 건만 현재 방송 주문서에 반영! (다른 방송 배송지는 건드리지 않음)
+                        const incoming = Object.values(val).filter(a => {
+                            if (!a || !a.nickname || !a.address) return false;
+                            if (!a.broadcastName || !cleanCurB) return true;
+                            const aBName = String(a.broadcastName).replace(/^주문_/, '').trim();
+                            return normalizeString(aBName) === normalizeString(cleanCurB);
+                        });
+                        if (incoming.length === 0) return;
+                        setCustomerGroups(prev => prev.map(g => {
+                            const matched = incoming.find(a =>
+                                normalizeString(a.nickname) === normalizeString(g.nick) ||
+                                (normalizeHandleNick(a.nickname) && normalizeHandleNick(a.nickname) === normalizeHandleNick(g.nick))
+                            );
+                            if (!matched) return g;
+                            const cleanPh = fixPhoneNumber(matched.phone || '');
+                            return {
+                                ...g,
+                                realname: matched.realname || g.realname,
+                                phone: cleanPh || g.phone,
+                                address: matched.address || g.address,
+                                memo: cleanMemoText(matched.memo || '', matched.address) || g.memo,
+                                pin: cleanPh.length >= 4 ? cleanPh.slice(-4) : g.pin
+                            };
+                        }));
+                    };
+
+                    const onPortalBcastAddr = (snap) => {
+                        const val = snap.val();
+                        if (!val || typeof val !== 'object') return;
+                        const incoming = Object.values(val).filter(a => a && a.nickname && a.address);
+                        if (incoming.length === 0) return;
+                        setCustomerGroups(prev => prev.map(g => {
+                            const matched = incoming.find(a =>
+                                normalizeString(a.nickname) === normalizeString(g.nick) ||
+                                (normalizeHandleNick(a.nickname) && normalizeHandleNick(a.nickname) === normalizeHandleNick(g.nick))
+                            );
+                            if (!matched) return g;
+                            const cleanPh = fixPhoneNumber(matched.phone || '');
+                            return {
+                                ...g,
+                                realname: matched.realname || g.realname,
+                                phone: cleanPh || g.phone,
+                                address: matched.address || g.address,
+                                memo: cleanMemoText(matched.memo || '', matched.address) || g.memo,
+                                pin: cleanPh.length >= 4 ? cleanPh.slice(-4) : g.pin
+                            };
+                        }));
+                    };
+
+                    const onPortalConf = (snap) => {
+                        const val = snap.val();
+                        if (!val || typeof val !== 'object') return;
+                        const confList = Object.values(val).filter(c => c && c.nickname);
+                        if (confList.length === 0) return;
+                        setCustomerGroups(prev => prev.map(g => {
+                            const isConf = confList.some(c =>
+                                normalizeString(c.nickname) === normalizeString(g.nick) ||
+                                (normalizeHandleNick(c.nickname) && normalizeHandleNick(c.nickname) === normalizeHandleNick(g.nick))
+                            );
+                            return isConf && !g.isConfirmed ? { ...g, isConfirmed: true } : g;
+                        }));
+                    };
+
+                    credRef.on('value', onCred);
+                    portalAddrRef.on('value', onPortalAddr);
+                    if (portalBcastAddrRef) portalBcastAddrRef.on('value', onPortalBcastAddr);
+                    portalConfRef.on('value', onPortalConf);
+                    return () => {
+                        credRef.off('value', onCred);
+                        portalAddrRef.off('value', onPortalAddr);
+                        if (portalBcastAddrRef) portalBcastAddrRef.off('value', onPortalBcastAddr);
+                        portalConfRef.off('value', onPortalConf);
+                    };
+                }
+            }, [loadInitialTabs, broadcastName, selectedTab]);
+
+            const handleUpdateCustomerCredit = useCallback(async (nick, nextCreditAmt) => {
+                const cleanAmt = Math.max(0, Number(nextCreditAmt) || 0);
+                setCustomerCredits(prev => ({ ...prev, [nick]: cleanAmt }));
+                if (staffFbDb) {
+                    const safeKey = String(nick || '').replace(/[.#$\[\]\/]/g, '_').trim();
+                    if (safeKey) {
+                        staffFbDb.ref(`ember_live_data/_portal_credits/${safeKey}`).set({
+                            nickname: nick,
+                            credit: cleanAmt,
+                            updatedAt: Date.now()
+                        }).catch(() => {});
+                    }
+                }
+                await fetchGas(DEFAULT_GAS_URL, {
+                    action: 'save_customer_credit',
+                    masterId: DEFAULT_MASTER_SHEET_ID,
+                    data: { nickname: nick, credit: cleanAmt }
+                });
+                showToast(`💰 '${nick}' 님의 보유 적립금이 ${cleanAmt.toLocaleString()}원으로 저장되었습니다!`);
+            }, [showToast]);
 
             const handleGlobalSearch = async () => {
                 const kw = globalKeyword.trim();
@@ -1163,14 +1299,14 @@
                             broadcastName: cleanBName,
                             rows: rowsToSave
                         });
-                        syncBroadcastGroupsToFirebase(cleanBName, customerGroups, freeShipThreshold, cardFeeRate);
-                        if (res && res.success) showToast(`✅ [${canonicalTab}] 시트 저장 완료!`);
+                        syncBroadcastGroupsToFirebase(cleanBName, customerGroups, freeShipThreshold, cardFeeRate, customerCredits, 'staff');
+                        if (res && res.success) showToast(`✅ [${canonicalTab}] 시트 저장 및 사장님 주문서 실시간 반영 완료!`);
                         else showToast('🚨 시트 저장 실패: ' + (res?.message || ''));
                     }
                 } finally {
                     setIsSaving(false);
                 }
-            }, [isSaving, activeMainTab, csGroups, selectedTab, broadcastName, freeShipThreshold, defaultShipping, cardFeeRate, customerGroups, getGroupSummary, showToast]);
+            }, [isSaving, activeMainTab, csGroups, selectedTab, broadcastName, freeShipThreshold, defaultShipping, cardFeeRate, customerGroups, customerCredits, getGroupSummary, showToast]);
 
             useEffect(() => {
                 const onKeyDown = (e) => {
@@ -1493,19 +1629,35 @@
                             const targetNick = addrEditTarget.nick;
                             const cleanBName = (broadcastName || selectedTab).replace(/^주문_/, '').trim();
                             const canonicalTab = '주문_' + cleanBName;
-                            updateCustomerGroup(targetNick, cur => ({
-                                ...cur,
-                                realname: newAddr.realname,
-                                phone: newAddr.phone,
-                                address: newAddr.address,
-                                memo: newAddr.memo,
-                                pin: newAddr.phone.length >= 4 ? newAddr.phone.slice(-4) : cur.pin
-                            }));
-                            // 로컬 찐고객사전 캐시도 최신화
-                            setMasterAddresses(prev => {
-                                const filtered = prev.filter(a => normalizeString(a.nickname) !== normalizeString(targetNick));
-                                return [{ nickname: targetNick, realname: newAddr.realname, phone: newAddr.phone, address: newAddr.address, memo: newAddr.memo }, ...filtered];
+                            setCustomerGroups(prev => {
+                                const nextGroups = prev.map(cur => cur.nick === targetNick ? {
+                                    ...cur,
+                                    realname: newAddr.realname,
+                                    phone: newAddr.phone,
+                                    address: newAddr.address,
+                                    memo: newAddr.memo,
+                                    pin: newAddr.phone.length >= 4 ? newAddr.phone.slice(-4) : cur.pin
+                                } : cur);
+                                syncBroadcastGroupsToFirebase(cleanBName, nextGroups, freeShipThreshold, cardFeeRate, customerCredits, 'staff');
+                                return nextGroups;
                             });
+                            if (staffFbDb) {
+                                const safeNickKey = String(targetNick || '').replace(/[.#$\[\]\/]/g, '_');
+                                const safeBKey = cleanBName.replace(/[.#$\[\]\/]/g, '_');
+                                const addrPayload = {
+                                    nickname: targetNick,
+                                    realname: newAddr.realname,
+                                    phone: newAddr.phone,
+                                    address: newAddr.address,
+                                    memo: newAddr.memo,
+                                    broadcastName: cleanBName,
+                                    updatedAt: new Date().toISOString()
+                                };
+                                if (safeBKey) {
+                                    staffFbDb.ref(`ember_live_data/_portal_broadcast_addresses/${safeBKey}/${safeNickKey}`).set(addrPayload).catch(() => {});
+                                }
+                                staffFbDb.ref(`ember_live_data/_portal_addresses/${safeNickKey}`).set(addrPayload).catch(() => {});
+                            }
                             setAddrEditTarget(null);
                             await fetchGas(DEFAULT_GAS_URL, {
                                 action: 'save_master_address',
@@ -1520,7 +1672,7 @@
                                     broadcastName: cleanBName
                                 }
                             });
-                            showToast(`✅ '${targetNick}' 배송지가 [${canonicalTab}] 시트와 찐고객사전에 즉시 등록되었습니다!`);
+                            showToast(`✅ '${targetNick}' 배송지가 [${canonicalTab}] 시트 및 사장님 주문서에 즉시 반영되었습니다!`);
                         }}
                     />
                     <CsCopySelectModal
@@ -2055,6 +2207,19 @@
 
                                                             <button
                                                                 type="button"
+                                                                onClick={() => openModal(`'${g.nick}' 고객님의 보유 적립금(원) 입력`, 'prompt', (val) => {
+                                                                    const num = Number(String(val || '').replace(/[^0-9]/g, '')) || 0;
+                                                                    handleUpdateCustomerCredit(g.nick, num);
+                                                                }, String(customerCredits[g.nick] || 0), '보유 적립금 설정')}
+                                                                className={`px-2 py-0.5 rounded text-[11px] font-extrabold border ${
+                                                                    (customerCredits[g.nick] || 0) > 0 ? 'bg-teal-600 text-white border-teal-700' : 'bg-white text-slate-500 border-slate-300'
+                                                                }`}
+                                                            >
+                                                                💰 {(customerCredits[g.nick] || 0) > 0 ? `적립금:${Number(customerCredits[g.nick]).toLocaleString()}원` : '적립금'}
+                                                            </button>
+
+                                                            <button
+                                                                type="button"
                                                                 onClick={() => setCsCopyTarget({ group: g, broadcastName: broadcastName })}
                                                                 className="px-2 py-0.5 rounded text-[11px] font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 flex items-center gap-1"
                                                             >
@@ -2084,9 +2249,29 @@
                                                                     미납 {sum.baseBal.toLocaleString()}원
                                                                 </span>
                                                             ) : sum.baseBal < 0 ? (
-                                                                <span className="text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
-                                                                    과납 {Math.abs(sum.baseBal).toLocaleString()}원
-                                                                </span>
+                                                                <div className="flex items-center gap-1">
+                                                                    <span className="text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                                                                        과납 {Math.abs(sum.baseBal).toLocaleString()}원
+                                                                    </span>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => {
+                                                                            const overAmt = Math.abs(sum.baseBal);
+                                                                            const curCred = Number(customerCredits[g.nick]) || 0;
+                                                                            const nextCred = curCred + overAmt;
+                                                                            openModal(`'${g.nick}' 님의 과납금 ${overAmt.toLocaleString()}원을 보유 적립금(총 ${nextCred.toLocaleString()}원)으로 전환하고 현재 주문서를 완납으로 정리할까요?`, 'confirm', () => {
+                                                                                handleUpdateCustomerCredit(g.nick, nextCred);
+                                                                                updateCustomerGroup(g.nick, cur => ({
+                                                                                    ...cur,
+                                                                                    deposit: Math.max(0, (Number(cur.deposit) || 0) - overAmt)
+                                                                                }));
+                                                                            });
+                                                                        }}
+                                                                        className="px-2 py-0.5 rounded bg-teal-600 hover:bg-teal-700 text-white text-[11px] font-extrabold shadow-sm"
+                                                                    >
+                                                                        👉 적립금전환
+                                                                    </button>
+                                                                </div>
                                                             ) : null}
                                                         </div>
                                                     </div>
