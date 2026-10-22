@@ -40,10 +40,10 @@
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 283; // 283 => v2.83, 299 => v2.99, 300 => v3.00
+        const VERSION_STEP = 285; // 285 => v2.85, 299 => v2.99, 300 => v3.00
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.22";
-        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbyauz2IJXVC8dyuYy11wMJiB7xrXkh_rRCJ-u4QPHWHFxL4gEZeg-QK2S4-4EURNyIA/exec';
+        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzBczJEJh3m4A_cMChAO2dcyLo2cuRA8pFcDDI-mZJc711bC0rIapnZwHokmmm2A0Ej/exec';
         const DEFAULT_STAFF_SHEET_ID = '1sM5bkDqEjD6Kpxu2yoJe2aiMuqpcWLMAIGpY3iL5_x8';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
         const DEFAULT_DEP_SHEET_ID = '14bx2HMd_NID3zQN-Hb0x0At2Qmti7-p1Zfx1ZadNScY';
@@ -1420,6 +1420,62 @@
                         }
                     }
 
+                    // ✨ 고객이 셀프 포털에서 방금 입력한 배송지(_portal_broadcast_addresses)와 주문확정(_portal_confirmed) 내역을 모든 방송 블록에 즉시 병합!
+                    if (staffFbDb && Object.keys(discoveredBlocks).length > 0) {
+                        try {
+                            const [bcastAddrSnap, confSnap] = await Promise.all([
+                                staffFbDb.ref('ember_live_data/_portal_broadcast_addresses').once('value'),
+                                staffFbDb.ref('ember_live_data/_portal_confirmed').once('value')
+                            ]);
+                            const allBcastAddrs = bcastAddrSnap.val() || {};
+                            const allConfMap = confSnap.val() || {};
+                            const confList = Object.values(allConfMap).filter(c => c && c.nickname);
+
+                            Object.values(discoveredBlocks).forEach(blk => {
+                                if (!blk || !Array.isArray(blk.groups)) return;
+                                const cleanB = cleanDisplayTabName(blk.broadcastName || '');
+                                const safeBKey = cleanB.replace(/[.#$\[\]\/]/g, '_');
+                                const addrMapForB = allBcastAddrs[safeBKey] || {};
+                                const addrEntries = Object.values(addrMapForB).filter(a => a && a.nickname && (a.address || a.baseAddress));
+
+                                blk.groups = blk.groups.map(g => {
+                                    let updatedG = { ...g };
+                                    if (addrEntries.length > 0) {
+                                        const matchedAddr = addrEntries.find(a =>
+                                            normalizeString(a.nickname) === normalizeString(g.nick) ||
+                                            (normalizeHandleNick(a.nickname) && normalizeHandleNick(a.nickname) === normalizeHandleNick(g.nick))
+                                        );
+                                        if (matchedAddr) {
+                                            const newAddrStr = stripZipcode(matchedAddr.address || `${matchedAddr.baseAddress || ''} ${matchedAddr.detailAddress || ''}`.trim());
+                                            const newReal = matchedAddr.realname || g.realname;
+                                            const newPh = fixPhoneNumber(matchedAddr.phone || g.phone);
+                                            const newMemo = cleanMemoText(matchedAddr.memo ?? g.memo, newAddrStr);
+                                            if (newAddrStr) {
+                                                updatedG = {
+                                                    ...updatedG,
+                                                    realname: newReal,
+                                                    phone: newPh,
+                                                    address: newAddrStr,
+                                                    memo: newMemo,
+                                                    pin: newPh.length >= 4 ? newPh.slice(-4) : updatedG.pin
+                                                };
+                                            }
+                                        }
+                                    }
+                                    if (!updatedG.isConfirmed && confList.length > 0) {
+                                        const isConf = confList.some(c => {
+                                            const cBName = cleanDisplayTabName(c.broadcastName || '');
+                                            if (cBName && normalizeString(cBName) !== normalizeString(cleanB)) return false;
+                                            return normalizeString(c.nickname) === normalizeString(g.nick);
+                                        });
+                                        if (isConf) updatedG.isConfirmed = true;
+                                    }
+                                    return updatedG;
+                                });
+                            });
+                        } catch (fbErr) {}
+                    }
+
                     // 시트에서 정상적으로 읽어왔다면 옛날 로컬 캐시(중복 방송들)를 버리고 시트 원본으로 100% 덮어씁니다!
                     const hasSheetData = Object.keys(discoveredBlocks).length > 0;
                     const finalBlocksMap = hasSheetData ? discoveredBlocks : localBroadcastStore;
@@ -1428,102 +1484,156 @@
                         localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(finalBlocksMap));
                     } catch (e) {}
 
-                    // 혹시 클라우드(_portal_orders)에 옛날 중복 이름으로 남아있던 방이 있으면 직원 시트 기준으로 정리
+                    // 클라우드(_portal_orders)에도 직원 시트의 방송들을 동기화
                     if (hasSheetData && staffFbDb) {
-                        Object.values(discoveredBlocks).forEach(blk => {
+                        Object.values(finalBlocksMap).forEach(blk => {
                             if (blk && blk.broadcastName && Array.isArray(blk.groups)) {
-                                syncBroadcastGroupsToFirebase(blk.broadcastName, blk.groups, blk.freeShipThreshold, blk.cardFeeRate, customerCredits, 'staff');
+                                syncBroadcastGroupsToFirebase(
+                                    blk.broadcastName,
+                                    blk.groups,
+                                    blk.freeShipThreshold || 70000,
+                                    blk.cardFeeRate || 10,
+                                    customerCredits,
+                                    'staff_init'
+                                );
                             }
                         });
                     }
 
-                    const allTabKeys = Object.keys(finalBlocksMap).filter(k =>
-                        k.startsWith('주문_') && !['주문_기본방송', '주문_주문', '주문_주문통합', '주문_메인주문'].includes(k)
-                    );
+                    const validSortedTabs = Object.keys(finalBlocksMap)
+                        .filter(t => t && t.startsWith('주문_') && !['주문_기본방송', '주문_주문', '주문_주문통합', '주문_메인주문'].includes(t))
+                        .sort((a, b) => {
+                            const scoreA = extractBroadcastDateScore(a);
+                            const scoreB = extractBroadcastDateScore(b);
+                            if (scoreA !== scoreB) return scoreB - scoreA;
+                            return b.localeCompare(a, 'ko');
+                        });
 
-                    const uniqueOrderTabs = allTabKeys.sort((a, b) => {
-                        const scoreA = extractBroadcastDateScore(a);
-                        const scoreB = extractBroadcastDateScore(b);
-                        if (scoreA !== scoreB) return scoreB - scoreA;
-                        return b.localeCompare(a, 'ko');
-                    });
+                    setOrderTabs(validSortedTabs);
 
-                    setOrderTabs(uniqueOrderTabs);
-                    const firstTab = uniqueOrderTabs[0] || '';
-                    if (firstTab) {
-                        const targetTab = (selectedTab && uniqueOrderTabs.includes(selectedTab)) ? selectedTab : firstTab;
+                    if (validSortedTabs.length > 0) {
+                        const targetTab = (selectedTab && validSortedTabs.includes(selectedTab)) ? selectedTab : validSortedTabs[0];
                         setSelectedTab(targetTab);
-                        const targetData = finalBlocksMap[targetTab];
-                        if (targetData && Array.isArray(targetData.groups)) {
-                            setBroadcastName(targetData.broadcastName);
-                            setFreeShipThreshold(targetData.freeShipThreshold || 70000);
-                            setDefaultShipping(targetData.defaultShipping || 4000);
-                            setCardFeeRate(targetData.cardFeeRate || 10);
-                            setCustomerGroups(targetData.groups);
+                        const targetBlk = finalBlocksMap[targetTab];
+                        if (targetBlk) {
+                            setBroadcastName(targetBlk.broadcastName || cleanDisplayTabName(targetTab));
+                            setFreeShipThreshold(targetBlk.freeShipThreshold || 70000);
+                            setDefaultShipping(targetBlk.defaultShipping || 4000);
+                            setCardFeeRate(targetBlk.cardFeeRate || 10);
+                            setCustomerGroups(targetBlk.groups || []);
                         }
                     } else {
                         setSelectedTab('');
-                        setBroadcastName('');
                         setCustomerGroups([]);
                     }
                     setHasUnsavedChanges(false);
-                    loadCsOrders();
-                    loadMasterAddresses();
                 } catch (e) {
+                    setIsLoading(false);
                 } finally {
                     setIsLoading(false);
                 }
-            }, [activeGasUrl, activeStaffSheetId, selectedTab, customerCredits, loadCsOrders, loadMasterAddresses]);
+            }, [activeGasUrl, activeStaffSheetId, localBroadcastStore, selectedTab, customerCredits]);
 
-            const hasInitializedRef = useRef(false);
             useEffect(() => {
-                if (hasInitializedRef.current) return;
-                hasInitializedRef.current = true;
-                loadInitialTabs();
-            }, [loadInitialTabs]);
+                loadInitialTabs(false);
+                loadCsOrders();
+                loadMasterAddresses();
+            }, []);
 
-            // ✨ [핵심] 사장님이 생방송을 마감して 넘기거나 다른 PC(사장님/직원)에서 직원용 시스템을 수정·저장했을 때, 그리고 고객이 포털에서 주소를 입력했을 때 모두 실시간으로 반영!
+            // ✨ [핵심] 고객이 포털에서 주소를 입력하거나 주문확정을 눌렀을 때 현재 보고 있는 방송뿐만 아니라 모든 방송 창고(localBroadcastStore)에 실시간으로 자동 반영!
             useEffect(() => {
                 if (!staffFbDb) return;
                 const cleanCurB = String(broadcastName || selectedTab || '').replace(/^주문_/, '').trim();
-                if (!cleanCurB) return;
-                const safeBKey = cleanCurB.replace(/[.#$\[\]\/]/g, '_');
 
-                const addrRef = staffFbDb.ref(`ember_live_data/_portal_broadcast_addresses/${safeBKey}`);
+                const allAddrRef = staffFbDb.ref('ember_live_data/_portal_broadcast_addresses');
                 const confRef = staffFbDb.ref('ember_live_data/_portal_confirmed');
 
-                const handlePortalAddrChange = (snap) => {
-                    const val = snap.val();
-                    if (!val || typeof val !== 'object') return;
-                    const addrEntries = Object.values(val).filter(a => a && a.nickname && (a.address || a.baseAddress));
-                    if (addrEntries.length === 0) return;
+                const handlePortalAllAddrChange = (snap) => {
+                    const allVal = snap.val();
+                    if (!allVal || typeof allVal !== 'object') return;
 
-                    setCustomerGroups(prev => {
-                        let changed = false;
-                        const next = prev.map(g => {
-                            const matched = addrEntries.find(a =>
-                                normalizeString(a.nickname) === normalizeString(g.nick) ||
-                                (normalizeHandleNick(a.nickname) && normalizeHandleNick(a.nickname) === normalizeHandleNick(g.nick))
-                            );
-                            if (!matched) return g;
-                            const newAddrStr = stripZipcode(matched.address || `${matched.baseAddress || ''} ${matched.detailAddress || ''}`.trim());
-                            const newReal = matched.realname || g.realname;
-                            const newPh = fixPhoneNumber(matched.phone || g.phone);
-                            const newMemo = cleanMemoText(matched.memo ?? g.memo, newAddrStr);
-                            if (newAddrStr && (g.address !== newAddrStr || g.realname !== newReal || g.phone !== newPh || g.memo !== newMemo)) {
-                                changed = true;
-                                return {
-                                    ...g,
-                                    realname: newReal,
-                                    phone: newPh,
-                                    address: newAddrStr,
-                                    memo: newMemo,
-                                    pin: newPh.length >= 4 ? newPh.slice(-4) : g.pin
-                                };
+                    // 1) 현재 화면에 열려있는 방송(customerGroups) 즉시 업데이트
+                    if (cleanCurB) {
+                        const safeCurBKey = cleanCurB.replace(/[.#$\[\]\/]/g, '_');
+                        const curBMap = allVal[safeCurBKey];
+                        if (curBMap && typeof curBMap === 'object') {
+                            const addrEntries = Object.values(curBMap).filter(a => a && a.nickname && (a.address || a.baseAddress));
+                            if (addrEntries.length > 0) {
+                                setCustomerGroups(prev => {
+                                    let changed = false;
+                                    const next = prev.map(g => {
+                                        const matched = addrEntries.find(a =>
+                                            normalizeString(a.nickname) === normalizeString(g.nick) ||
+                                            (normalizeHandleNick(a.nickname) && normalizeHandleNick(a.nickname) === normalizeHandleNick(g.nick))
+                                        );
+                                        if (!matched) return g;
+                                        const newAddrStr = stripZipcode(matched.address || `${matched.baseAddress || ''} ${matched.detailAddress || ''}`.trim());
+                                        const newReal = matched.realname || g.realname;
+                                        const newPh = fixPhoneNumber(matched.phone || g.phone);
+                                        const newMemo = cleanMemoText(matched.memo ?? g.memo, newAddrStr);
+                                        if (newAddrStr && (g.address !== newAddrStr || g.realname !== newReal || g.phone !== newPh || g.memo !== newMemo)) {
+                                            changed = true;
+                                            return {
+                                                ...g,
+                                                realname: newReal,
+                                                phone: newPh,
+                                                address: newAddrStr,
+                                                memo: newMemo,
+                                                pin: newPh.length >= 4 ? newPh.slice(-4) : g.pin
+                                            };
+                                        }
+                                        return g;
+                                    });
+                                    return changed ? next : prev;
+                                });
                             }
-                            return g;
+                        }
+                    }
+
+                    // 2) 백그라운드의 다른 방송들(localBroadcastStore)도 고객이 입력한 주소로 동시 업데이트하여 저장 시 절대 누락되지 않도록 보호!
+                    setLocalBroadcastStore(prevStore => {
+                        let storeChanged = false;
+                        const nextStore = { ...prevStore };
+                        Object.keys(nextStore).forEach(tabKey => {
+                            const blk = nextStore[tabKey];
+                            if (!blk || !Array.isArray(blk.groups)) return;
+                            const bTitle = cleanDisplayTabName(blk.broadcastName || tabKey);
+                            const safeBKey = bTitle.replace(/[.#$\[\]\/]/g, '_');
+                            const bAddrMap = allVal[safeBKey];
+                            if (!bAddrMap || typeof bAddrMap !== 'object') return;
+                            const addrEntries = Object.values(bAddrMap).filter(a => a && a.nickname && (a.address || a.baseAddress));
+                            if (addrEntries.length === 0) return;
+
+                            let blkChanged = false;
+                            const nextGroups = blk.groups.map(g => {
+                                const matched = addrEntries.find(a =>
+                                    normalizeString(a.nickname) === normalizeString(g.nick) ||
+                                    (normalizeHandleNick(a.nickname) && normalizeHandleNick(a.nickname) === normalizeHandleNick(g.nick))
+                                );
+                                if (!matched) return g;
+                                const newAddrStr = stripZipcode(matched.address || `${matched.baseAddress || ''} ${matched.detailAddress || ''}`.trim());
+                                const newReal = matched.realname || g.realname;
+                                const newPh = fixPhoneNumber(matched.phone || g.phone);
+                                const newMemo = cleanMemoText(matched.memo ?? g.memo, newAddrStr);
+                                if (newAddrStr && (g.address !== newAddrStr || g.realname !== newReal || g.phone !== newPh || g.memo !== newMemo)) {
+                                    blkChanged = true;
+                                    return {
+                                        ...g,
+                                        realname: newReal,
+                                        phone: newPh,
+                                        address: newAddrStr,
+                                        memo: newMemo,
+                                        pin: newPh.length >= 4 ? newPh.slice(-4) : g.pin
+                                    };
+                                }
+                                return g;
+                            });
+                            if (blkChanged) {
+                                storeChanged = true;
+                                nextStore[tabKey] = { ...blk, groups: nextGroups };
+                            }
                         });
-                        return changed ? next : prev;
+                        return storeChanged ? nextStore : prevStore;
                     });
                 };
 
@@ -1539,7 +1649,7 @@
                             if (g.isConfirmed) return g;
                             const isConf = confList.some(c => {
                                 const cBName = String(c.broadcastName || '').replace(/^주문_/, '').trim();
-                                if (cBName && normalizeString(cBName) !== normalizeString(cleanCurB)) return false;
+                                if (cBName && cleanCurB && normalizeString(cBName) !== normalizeString(cleanCurB)) return false;
                                 return normalizeString(c.nickname) === normalizeString(g.nick);
                             });
                             if (isConf) {
@@ -1552,10 +1662,10 @@
                     });
                 };
 
-                addrRef.on('value', handlePortalAddrChange);
+                allAddrRef.on('value', handlePortalAllAddrChange);
                 confRef.on('value', handlePortalConfirmChange);
                 return () => {
-                    addrRef.off('value', handlePortalAddrChange);
+                    allAddrRef.off('value', handlePortalAllAddrChange);
                     confRef.off('value', handlePortalConfirmChange);
                 };
             }, [broadcastName, selectedTab]);
