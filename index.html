@@ -6,15 +6,24 @@
     <meta name="theme-color" content="#202124">
     <title>엠버 직원용 시스템</title>
 
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
-    <script src="https://unpkg.com/@babel/standalone@7.23.9/babel.min.js" crossorigin="anonymous"></script>
+    <script>
+        window.addEventListener('error', function(e) {
+            if (!e.message || e.message === 'Script error.' || (e.filename && e.filename.includes('google.com'))) {
+                e.preventDefault();
+                return true;
+            }
+        }, true);
+    </script>
+
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.23.9/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/@phosphor-icons/web" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js" crossorigin="anonymous"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js" crossorigin="anonymous"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
 
     <style>
         @import url("https://cdn.jsdelivr.net/gh/moonspam/NanumSquareNeo/nanumsquareneo.css");
@@ -40,7 +49,7 @@
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 289; // 289 => v2.89
+        const VERSION_STEP = 291; // 291 => v2.91
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.22";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbxvccAS0Zy37eBEyY0IDgHBFroNwzabYVDvg3JvaYUQYr9d_hfxdWdKbDssEPg-OJN7/exec';
@@ -49,6 +58,98 @@
         const DEFAULT_DEP_SHEET_ID = '14bx2HMd_NID3zQN-Hb0x0At2Qmti7-p1Zfx1ZadNScY';
         const STAFF_LOCAL_STORE_KEY = 'ember_staff_independent_store_v1';
         const STAFF_LOCAL_DIRTY_TIME_KEY = 'ember_staff_dirty_ts_v1';
+
+        const Icon = ({ name, className = "", weight = "regular", size = 15 }) => (
+            <i className={`ph ph-${name} ${className}`} data-phosphor-icon-weight={weight} style={{ fontSize: size }}></i>
+        );
+
+        const normalizeString = (str) => String(str || '').replace(/[\s\(\)\[\]\{\}\-\_\.\,\/]/g, '').toLowerCase();
+
+        const normalizeHandleNick = (str) => {
+            if (!str) return '';
+            let s = String(str).trim();
+            s = s.replace(/-[a-zA-Z0-9_]{1,10}$/, '');
+            return normalizeString(s);
+        };
+
+        const stripZipcode = (str) => String(str || '').replace(/^\(\d{5}\)\s*/, '').trim();
+
+        const fixPhoneNumber = (numStr) => {
+            if (!numStr) return '';
+            let cleaned = String(numStr).replace(/[^0-9]/g, '');
+            if (cleaned.length === 10 && !cleaned.startsWith('0')) cleaned = '0' + cleaned;
+            return cleaned;
+        };
+
+        const normalizePin4 = (val) => {
+            if (val === undefined || val === null) return '';
+            const digits = String(val).replace(/[^0-9]/g, '');
+            if (!digits) return '';
+            return digits.length < 4 ? digits.padStart(4, '0') : digits.slice(-4);
+        };
+
+        const copyToClipboard = (text) => {
+            if (!text) return;
+            const ta = document.createElement('textarea');
+            ta.value = String(text);
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch (e) {}
+            document.body.removeChild(ta);
+        };
+
+        const extractBroadcastDateScore = (tabName) => {
+            const s = String(tabName || '').replace(/^주문_/, '').trim();
+            if (!s) return 0;
+            const fullMatch = s.match(/(?:20)?(\d{2})[./\-\s년]+(\d{1,2})[./\-\s월]+(\d{1,2})/);
+            if (fullMatch) {
+                const yy = parseInt(fullMatch[1], 10);
+                const mm = parseInt(fullMatch[2], 10);
+                const dd = parseInt(fullMatch[3], 10);
+                if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+                    return (2000 + yy) * 10000 + mm * 100 + dd;
+                }
+            }
+            const mdMatch = s.match(/(?:^|[^\d])(1[0-2]|0?[1-9])[./\-\s월]+([0-2]?\d|3[01])(?:일|\b|\s|[^0-9])/);
+            if (mdMatch) {
+                const mm = parseInt(mdMatch[1], 10);
+                const dd = parseInt(mdMatch[2], 10);
+                return 2026 * 10000 + mm * 100 + dd;
+            }
+            return 0;
+        };
+
+        const pickRowField = (row, keys, fallbackIdx = -1) => {
+            if (!row || typeof row !== 'object') return '';
+            for (let i = 0; i < keys.length; i++) {
+                const k = keys[i];
+                if (row[k] !== undefined && row[k] !== null && row[k] !== '') {
+                    return row[k];
+                }
+            }
+            const rowKeys = Object.keys(row).filter(rk => !/^col_\d+$/.test(rk));
+            for (let i = 0; i < keys.length; i++) {
+                const targetNorm = normalizeString(keys[i]);
+                const foundKey = rowKeys.find(rk => normalizeString(rk) === targetNorm || normalizeString(rk).includes(targetNorm));
+                if (foundKey && row[foundKey] !== undefined && row[foundKey] !== null && row[foundKey] !== '') {
+                    return row[foundKey];
+                }
+            }
+            if (fallbackIdx >= 0 && row[`col_${fallbackIdx}`] !== undefined && row[`col_${fallbackIdx}`] !== null && row[`col_${fallbackIdx}`] !== '') {
+                return row[`col_${fallbackIdx}`];
+            }
+            return '';
+        };
+
+        const cleanMemoText = (memoVal, addrVal) => {
+            const m = String(memoVal || '').trim();
+            const a = String(addrVal || '').trim();
+            if (!m) return '';
+            if (a && (m === a || normalizeString(m) === normalizeString(a))) return '';
+            if (a && a.length >= 6 && (a.includes(m) || m.includes(a))) return '';
+            if (/^\(\d{5}\)/.test(m)) return '';
+            return m;
+        };
 
         const getCleanSheetId = (idOrUrl) => {
             if (!idOrUrl) return '';
@@ -68,15 +169,21 @@
         // 구글 시트 공개/공유 문서에서 앱스 스크립트가 막혀도 브라우저가 직접 시트 탭(또는 첫 번째 통합 시트 gid=0)을 읽어오는 직통 함수 (JSONP)
         const fetchGoogleSheetDirect = (sheetId, sheetName = null) => {
             return new Promise((resolve) => {
+                let settled = false;
                 const cbName = `gviz_cb_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
                 const timer = setTimeout(() => {
-                    if (window[cbName]) delete window[cbName];
-                    resolve(null);
-                }, 8000);
+                    if (!settled) {
+                        settled = true;
+                        window[cbName] = () => {};
+                        resolve(null);
+                    }
+                }, 6000);
 
                 window[cbName] = (res) => {
+                    if (settled) return;
+                    settled = true;
                     clearTimeout(timer);
-                    delete window[cbName];
+                    window[cbName] = () => {};
                     if (!res || res.status === 'error' || !res.table) {
                         resolve(null);
                         return;
@@ -95,16 +202,27 @@
                     resolve(rows);
                 };
 
-                const script = document.createElement('script');
-                const sheetParam = sheetName ? `&sheet=${encodeURIComponent(sheetName)}` : `&gid=0`;
-                script.src = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=responseHandler:${cbName}${sheetParam}&headers=1&t=${Date.now()}`;
-                script.onerror = () => {
-                    clearTimeout(timer);
-                    if (window[cbName]) delete window[cbName];
-                    resolve(null);
-                };
-                document.body.appendChild(script);
-                setTimeout(() => { try { document.body.removeChild(script); } catch (e) {} }, 9000);
+                try {
+                    const script = document.createElement('script');
+                    const sheetParam = sheetName ? `&sheet=${encodeURIComponent(sheetName)}` : `&gid=0`;
+                    script.src = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=responseHandler:${cbName}${sheetParam}&headers=1&t=${Date.now()}`;
+                    script.onerror = () => {
+                        if (!settled) {
+                            settled = true;
+                            clearTimeout(timer);
+                            window[cbName] = () => {};
+                            resolve(null);
+                        }
+                    };
+                    document.body.appendChild(script);
+                    setTimeout(() => { try { if (script.parentNode) script.parentNode.removeChild(script); } catch (e) {} }, 7000);
+                } catch (err) {
+                    if (!settled) {
+                        settled = true;
+                        clearTimeout(timer);
+                        resolve(null);
+                    }
+                }
             });
         };
 
@@ -303,98 +421,6 @@
                 staffFbDb = window.firebase.database();
             }
         } catch (e) {}
-
-        const Icon = ({ name, className = "", weight = "regular", size = 15 }) => (
-            <i className={`ph ph-${name} ${className}`} data-phosphor-icon-weight={weight} style={{ fontSize: size }}></i>
-        );
-
-        const normalizeString = (str) => String(str || '').replace(/[\s\(\)\[\]\{\}\-\_\.\,\/]/g, '').toLowerCase();
-
-        const normalizeHandleNick = (str) => {
-            if (!str) return '';
-            let s = String(str).trim();
-            s = s.replace(/-[a-zA-Z0-9_]{1,10}$/, '');
-            return normalizeString(s);
-        };
-
-        const stripZipcode = (str) => String(str || '').replace(/^\(\d{5}\)\s*/, '').trim();
-
-        const fixPhoneNumber = (numStr) => {
-            if (!numStr) return '';
-            let cleaned = String(numStr).replace(/[^0-9]/g, '');
-            if (cleaned.length === 10 && !cleaned.startsWith('0')) cleaned = '0' + cleaned;
-            return cleaned;
-        };
-
-        const normalizePin4 = (val) => {
-            if (val === undefined || val === null) return '';
-            const digits = String(val).replace(/[^0-9]/g, '');
-            if (!digits) return '';
-            return digits.length < 4 ? digits.padStart(4, '0') : digits.slice(-4);
-        };
-
-        const copyToClipboard = (text) => {
-            if (!text) return;
-            const ta = document.createElement('textarea');
-            ta.value = String(text);
-            document.body.appendChild(ta);
-            ta.select();
-            try { document.execCommand('copy'); } catch (e) {}
-            document.body.removeChild(ta);
-        };
-
-        const extractBroadcastDateScore = (tabName) => {
-            const s = String(tabName || '').replace(/^주문_/, '').trim();
-            if (!s) return 0;
-            const fullMatch = s.match(/(?:20)?(\d{2})[./\-\s년]+(\d{1,2})[./\-\s월]+(\d{1,2})/);
-            if (fullMatch) {
-                const yy = parseInt(fullMatch[1], 10);
-                const mm = parseInt(fullMatch[2], 10);
-                const dd = parseInt(fullMatch[3], 10);
-                if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
-                    return (2000 + yy) * 10000 + mm * 100 + dd;
-                }
-            }
-            const mdMatch = s.match(/(?:^|[^\d])(1[0-2]|0?[1-9])[./\-\s월]+([0-2]?\d|3[01])(?:일|\b|\s|[^0-9])/);
-            if (mdMatch) {
-                const mm = parseInt(mdMatch[1], 10);
-                const dd = parseInt(mdMatch[2], 10);
-                return 2026 * 10000 + mm * 100 + dd;
-            }
-            return 0;
-        };
-
-        const pickRowField = (row, keys, fallbackIdx = -1) => {
-            if (!row || typeof row !== 'object') return '';
-            for (let i = 0; i < keys.length; i++) {
-                const k = keys[i];
-                if (row[k] !== undefined && row[k] !== null && row[k] !== '') {
-                    return row[k];
-                }
-            }
-            const rowKeys = Object.keys(row).filter(rk => !/^col_\d+$/.test(rk));
-            for (let i = 0; i < keys.length; i++) {
-                const targetNorm = normalizeString(keys[i]);
-                const foundKey = rowKeys.find(rk => normalizeString(rk) === targetNorm || normalizeString(rk).includes(targetNorm));
-                if (foundKey && row[foundKey] !== undefined && row[foundKey] !== null && row[foundKey] !== '') {
-                    return row[foundKey];
-                }
-            }
-            if (fallbackIdx >= 0 && row[`col_${fallbackIdx}`] !== undefined && row[`col_${fallbackIdx}`] !== null && row[`col_${fallbackIdx}`] !== '') {
-                return row[`col_${fallbackIdx}`];
-            }
-            return '';
-        };
-
-        const cleanMemoText = (memoVal, addrVal) => {
-            const m = String(memoVal || '').trim();
-            const a = String(addrVal || '').trim();
-            if (!m) return '';
-            if (a && (m === a || normalizeString(m) === normalizeString(a))) return '';
-            if (a && a.length >= 6 && (a.includes(m) || m.includes(a))) return '';
-            if (/^\(\d{5}\)/.test(m)) return '';
-            return m;
-        };
 
         const syncBroadcastGroupsToFirebase = (bNameRaw, groupsList, fThresh = 70000, cRate = 10, creditsMap = {}, sourceRole = 'staff') => {
             if (!staffFbDb || !bNameRaw || !Array.isArray(groupsList)) return;
