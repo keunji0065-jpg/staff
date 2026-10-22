@@ -49,7 +49,7 @@
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 291; // 291 => v2.91
+        const VERSION_STEP = 292; // 292 => v2.92
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.22";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbxvccAS0Zy37eBEyY0IDgHBFroNwzabYVDvg3JvaYUQYr9d_hfxdWdKbDssEPg-OJN7/exec';
@@ -1493,10 +1493,14 @@
                         localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(finalBlocksMap));
                     } catch (e) {}
 
-                    // 클라우드(_portal_orders)에도 직원 시트의 방송들을 동기화
+                    // 클라우드(_portal_orders)에도 직원 시트의 방송들을 동기화하고, 시트에 없는 옛날 이름('10/20 악세사리', '10/18 여성복' 등)은 즉시 청소!
                     if (hasSheetData && staffFbDb) {
+                        const validSafeKeys = new Set();
                         Object.values(finalBlocksMap).forEach(blk => {
                             if (blk && blk.broadcastName && Array.isArray(blk.groups)) {
+                                const cleanB = cleanDisplayTabName(blk.broadcastName);
+                                const safeBKey = cleanB.replace(/[.#$\[\]\/]/g, '_');
+                                validSafeKeys.add(safeBKey);
                                 syncBroadcastGroupsToFirebase(
                                     blk.broadcastName,
                                     blk.groups,
@@ -1507,6 +1511,15 @@
                                 );
                             }
                         });
+                        staffFbDb.ref('ember_live_data/_portal_orders').once('value').then(snap => {
+                            const allNodes = snap.val() || {};
+                            Object.keys(allNodes).forEach(k => {
+                                if (k === '__MAIN_LIVE__') return;
+                                if (!validSafeKeys.has(k)) {
+                                    staffFbDb.ref(`ember_live_data/_portal_orders/${k}`).remove().catch(() => {});
+                                }
+                            });
+                        }).catch(() => {});
                     }
 
                     const validSortedTabs = Object.keys(finalBlocksMap)
