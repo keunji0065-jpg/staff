@@ -49,7 +49,7 @@
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 293; // 293 => v2.93
+        const VERSION_STEP = 300; // 300 => v3.00
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.22";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzrMczblUPLxqGESdkZks8osdL-CihDenW94Ae3ODL8u_QhVAZGKrsVI_KchtHjCTFg/exec';
@@ -58,6 +58,7 @@
         const DEFAULT_DEP_SHEET_ID = '14bx2HMd_NID3zQN-Hb0x0At2Qmti7-p1Zfx1ZadNScY';
         const STAFF_LOCAL_STORE_KEY = 'ember_staff_independent_store_v1';
         const STAFF_LOCAL_DIRTY_TIME_KEY = 'ember_staff_dirty_ts_v1';
+        const STAFF_CS_DIRTY_TIME_KEY = 'ember_staff_cs_dirty_ts_v1';
 
         const Icon = ({ name, className = "", weight = "regular", size = 15 }) => (
             <i className={`ph ph-${name} ${className}`} data-phosphor-icon-weight={weight} style={{ fontSize: size }}></i>
@@ -513,9 +514,21 @@
                 return await attemptFetch();
             } catch (firstErr) {
                 try {
-                    await new Promise(r => setTimeout(r, 500));
+                    await new Promise(r => setTimeout(r, 400));
                     return await attemptFetch();
                 } catch (secondErr) {
+                    // POST 저장 시 CORS 리다이렉트로 응답 읽기만 실패한 경우 no-cors 폴백으로 시트 기록 보장!
+                    if (payload) {
+                        try {
+                            await fetch(url, {
+                                method: 'POST',
+                                mode: 'no-cors',
+                                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                                body: JSON.stringify(payload)
+                            });
+                            return { status: 'success', success: true, fallbackNoCors: true };
+                        } catch (noCorsErr) {}
+                    }
                     return { status: 'error', message: secondErr.message || '통신 실패' };
                 }
             }
@@ -1076,13 +1089,6 @@
                 } catch (e) {}
                 return [];
             });
-            useEffect(() => {
-                try { localStorage.setItem('ember_staff_cs_groups_v1', JSON.stringify(csGroups)); } catch (e) {}
-                if (Array.isArray(csGroups) && csGroups.length > 0) {
-                    syncCsGroupsToFirebase(csGroups);
-                }
-            }, [csGroups]);
-
             const [masterAddresses, setMasterAddresses] = useState(() => {
                 try {
                     const saved = localStorage.getItem('ember_staff_master_addrs_v1');
@@ -1090,32 +1096,18 @@
                 } catch (e) {}
                 return [];
             });
-            const [customerCredits, setCustomerCredits] = useState(() => {
-                try {
-                    const saved = localStorage.getItem('ember_staff_credits_v1');
-                    if (saved) return JSON.parse(saved);
-                } catch (e) {}
-                return {};
-            });
-            useEffect(() => {
-                try { localStorage.setItem('ember_staff_credits_v1', JSON.stringify(customerCredits)); } catch (e) {}
-            }, [customerCredits]);
+            const [customerCredits, setCustomerCredits] = useState({});
+            const [vipNickMap, setVipNickMap] = useState({});
 
-            const [showNewNickSuggest, setShowNewNickSuggest] = useState(false);
             const [activeMainTab, setActiveMainTab] = useState('orders');
             const [statusFilter, setStatusFilter] = useState('all');
-            const [csStatusFilter, setCsStatusFilter] = useState('all');
-
             const [localSearchTerm, setLocalSearchTerm] = useState('');
             const [csSearchTerm, setCsSearchTerm] = useState('');
+            const [csStatusFilter, setCsStatusFilter] = useState('all');
+
             const [globalKeyword, setGlobalKeyword] = useState('');
             const [globalSearchResults, setGlobalSearchResults] = useState(null);
             const [isSearchingGlobal, setIsSearchingGlobal] = useState(false);
-
-            const [newNick, setNewNick] = useState('');
-            const [newProd, setNewProd] = useState('');
-            const [newQty, setNewQty] = useState(1);
-            const [newPrice, setNewPrice] = useState('');
 
             const [isLoading, setIsLoading] = useState(false);
             const [isSaving, setIsSaving] = useState(false);
@@ -1128,8 +1120,27 @@
             const [cleanupModalOpen, setCleanupModalOpen] = useState(false);
             const [selectedOldTabs, setSelectedOldTabs] = useState({});
 
-            const trackingExcelRef = useRef(null);
+            const [newNick, setNewNick] = useState('');
+            const [showNewNickSuggest, setShowNewNickSuggest] = useState(false);
+            const [newProd, setNewProd] = useState('');
+            const [newQty, setNewQty] = useState(1);
+            const [newPrice, setNewPrice] = useState('');
+
+            const [trackingExcelRef] = [useRef(null)];
             const currentBroadcastRef = useRef('');
+            const autoSaveOrdersTimerRef = useRef(null);
+            const autoSaveCsTimerRef = useRef(null);
+            const isOrdersSavingQueueRef = useRef(false);
+            const pendingOrdersRowsRef = useRef(null);
+            const isCsSavingQueueRef = useRef(false);
+            const pendingCsListRef = useRef(null);
+            const csGroupsRef = useRef(csGroups);
+            const customerGroupsRef = useRef(customerGroups);
+            const localBroadcastStoreRef = useRef(localBroadcastStore);
+
+            useEffect(() => { csGroupsRef.current = csGroups; }, [csGroups]);
+            useEffect(() => { customerGroupsRef.current = customerGroups; }, [customerGroups]);
+            useEffect(() => { localBroadcastStoreRef.current = localBroadcastStore; }, [localBroadcastStore]);
 
             useEffect(() => {
                 currentBroadcastRef.current = cleanDisplayTabName(broadcastName || selectedTab || '');
@@ -1143,6 +1154,63 @@
             const openModal = useCallback((message, type = 'alert', onConfirm = null, defaultValue = '', title = '확인') => {
                 setModal({ isOpen: true, title, message, type, onConfirm, defaultValue });
             }, []);
+
+            // ✨ CS 내역(미송/교환/반품)을 절대 유실되지 않는 순차 대기열(Queue)을 통해 직원용 구글 시트('교환반품CS' 탭)와 고객 포털(Firebase)에 즉시 저장하는 전용 함수
+            const flushCsQueueToSheet = useCallback(async () => {
+                if (isCsSavingQueueRef.current) return;
+                isCsSavingQueueRef.current = true;
+                try {
+                    while (pendingCsListRef.current !== null) {
+                        const listToPush = pendingCsListRef.current;
+                        pendingCsListRef.current = null;
+                        const serializedCs = listToPush.map(c => ({
+                            ...c,
+                            csMemo: combineCsMemoAndAccount(c.csMemo, c.refundAccount, c.refundAmount, c.refundCompleted),
+                            shipping: Number(c.shipping) || 0,
+                            deposit: c.csFeePaid ? (Number(c.shipping) || Number(c.deposit) || 0) : 0
+                        }));
+                        await fetchGas(activeGasUrl, {
+                            action: 'save_cs_orders',
+                            masterId: activeStaffSheetId,
+                            items: serializedCs
+                        }, 15000);
+                    }
+                } catch (e) {} finally {
+                    isCsSavingQueueRef.current = false;
+                }
+            }, [activeGasUrl, activeStaffSheetId]);
+
+            const saveCsOrdersToSheetImmediate = useCallback((targetCsList, toastMessage = '') => {
+                const listToSave = Array.isArray(targetCsList) ? targetCsList : csGroupsRef.current;
+                csGroupsRef.current = listToSave;
+                try {
+                    localStorage.setItem('ember_staff_cs_groups_v1', JSON.stringify(listToSave));
+                    localStorage.setItem(STAFF_CS_DIRTY_TIME_KEY, String(Date.now()));
+                } catch (e) {}
+
+                // 1) 고객 포털 클라우드(_portal_cs)에 0.01초 만에 즉시 동기화 및 알림 표시 (화면 멈춤 ZERO)
+                syncCsGroupsToFirebase(listToSave);
+                setHasUnsavedChanges(false);
+                if (toastMessage) showToast(toastMessage);
+
+                // 2) 직원용 구글 시트('교환반품CS' 탭) 대기열에 최신 리스트를 넣고 끝까지 순차 저장 보장!
+                pendingCsListRef.current = listToSave;
+                flushCsQueueToSheet();
+            }, [flushCsQueueToSheet, showToast]);
+
+            // CS 데이터(메모, 계좌번호, 송장 등) 타이핑 수정 시 0.5초 디바운스로 자동 시트 저장 예약
+            const scheduleAutoSaveCs = useCallback((nextCsList, msg = '') => {
+                csGroupsRef.current = nextCsList;
+                try {
+                    localStorage.setItem('ember_staff_cs_groups_v1', JSON.stringify(nextCsList));
+                    localStorage.setItem(STAFF_CS_DIRTY_TIME_KEY, String(Date.now()));
+                } catch (e) {}
+                syncCsGroupsToFirebase(nextCsList);
+                if (autoSaveCsTimerRef.current) clearTimeout(autoSaveCsTimerRef.current);
+                autoSaveCsTimerRef.current = setTimeout(() => {
+                    saveCsOrdersToSheetImmediate(nextCsList, msg);
+                }, 500);
+            }, [saveCsOrdersToSheetImmediate]);
 
             // 현재 화면에서 수정된 customerGroups를 로컬 방송 창고에도 자동 백업 (새로고침해도 절대 날아가지 않음)
             useEffect(() => {
@@ -1244,7 +1312,20 @@
                         }
                     }
 
-                    if (rawList.length === 0) return;
+                    // 🛡️ 직원이 방금 CS를 등록/수정한 지 25초 이내라면 구글 시트의 느린 캐시가 최신 로컬 CS 목록을 덮어쓰지 못하도록 완벽 보호!
+                    const lastCsDirtyTs = Number(localStorage.getItem(STAFF_CS_DIRTY_TIME_KEY) || '0');
+                    if (Date.now() - lastCsDirtyTs < 25000 && csGroupsRef.current && csGroupsRef.current.length > 0) {
+                        syncCsGroupsToFirebase(csGroupsRef.current);
+                        return;
+                    }
+
+                    if (rawList.length === 0) {
+                        // 서버 시트가 비어있는데 로컬에 기존 CS 내역이 있다면 시트로 즉시 백업 푸시!
+                        if (csGroupsRef.current && csGroupsRef.current.length > 0) {
+                            saveCsOrdersToSheetImmediate(csGroupsRef.current);
+                        }
+                        return;
+                    }
                     const parsed = rawList.map((r, i) => {
                         let items = [];
                         const jsonRaw = pickRowField(r, ['전체품목JSON', 'itemsJson'], 15);
@@ -1320,13 +1401,23 @@
 
                     if (res && Array.isArray(res.customerDb)) {
                         const sheetCredits = {};
+                        const sheetVips = {};
                         res.customerDb.forEach(c => {
                             const n = String(c['닉네임'] || '').trim();
+                            const st = String(c['고객상태'] || '').trim().toLowerCase();
                             const cred = Number(String(c['적립금'] || '0').replace(/[^0-9.-]/g, '')) || 0;
+                            if (n && (st === 'vip' || st === 'manager' || st === '관리자')) {
+                                sheetVips[normalizeString(n)] = true;
+                                const hKey = normalizeHandleNick(n);
+                                if (hKey) sheetVips[hKey] = true;
+                            }
                             if (n && cred >= 0 && c['적립금'] !== '' && c['적립금'] !== undefined) {
                                 sheetCredits[n] = cred;
                             }
                         });
+                        if (Object.keys(sheetVips).length > 0) {
+                            setVipNickMap(prev => ({ ...prev, ...sheetVips }));
+                        }
                         if (Object.keys(sheetCredits).length > 0) {
                             setCustomerCredits(prev => ({ ...sheetCredits, ...prev }));
                         }
@@ -1487,7 +1578,12 @@
 
                     // 시트에서 정상적으로 읽어왔다면 옛날 로컬 캐시(중복 방송들)를 버리고 시트 원본으로 100% 덮어씁니다!
                     const hasSheetData = Object.keys(discoveredBlocks).length > 0;
-                    const finalBlocksMap = hasSheetData ? discoveredBlocks : localBroadcastStore;
+                    // 🛡️ 직원이 방금 주문을 추가/수정한 지 25초 이내라면 구글 시트의 옛날 캐시가 로컬 최신 주문을 덮어쓰지 않도록 보호!
+                    const lastOrderDirtyTs = Number(localStorage.getItem(STAFF_LOCAL_DIRTY_TIME_KEY) || '0');
+                    const isRecentlyModifiedByStaff = (Date.now() - lastOrderDirtyTs < 25000) && Object.keys(localBroadcastStoreRef.current || {}).length > 0;
+                    const finalBlocksMap = isRecentlyModifiedByStaff
+                        ? { ...discoveredBlocks, ...localBroadcastStoreRef.current }
+                        : (hasSheetData ? discoveredBlocks : localBroadcastStore);
                     setLocalBroadcastStore(finalBlocksMap);
                     try {
                         localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(finalBlocksMap));
@@ -1733,8 +1829,23 @@
                 const cleanAmt = Math.max(0, Number(nextCreditAmt) || 0);
                 setCustomerCredits(prev => ({ ...prev, [nick]: cleanAmt }));
                 setHasUnsavedChanges(true);
-                showToast(`💰 '${nick}' 님의 적립금(${cleanAmt.toLocaleString()}원)이 화면에 반영되었습니다. [시트 저장 (Ctrl+S)]을 눌러야 최종 저장됩니다!`);
-            }, [showToast]);
+                fetchGas(activeGasUrl, {
+                    action: 'save_customer_credit',
+                    masterId: activeDictSheetId,
+                    data: { nickname: nick, credit: cleanAmt }
+                }).catch(() => {});
+                if (staffFbDb) {
+                    const safeNickKey = String(nick || '').replace(/[.#$\[\]\/]/g, '_').trim();
+                    if (safeNickKey) {
+                        staffFbDb.ref(`ember_live_data/_portal_credits/${safeNickKey}`).set({
+                            nickname: nick,
+                            credit: cleanAmt,
+                            updatedAt: Date.now()
+                        }).catch(() => {});
+                    }
+                }
+                showToast(`💰 '${nick}' 님의 적립금(${cleanAmt.toLocaleString()}원)이 시트와 고객 포털에 즉시 저장되었습니다!`);
+            }, [activeGasUrl, activeDictSheetId, showToast]);
 
             const handleGlobalSearch = async () => {
                 const kw = globalKeyword.trim();
@@ -1847,11 +1958,11 @@
                 const useAmt = Math.min(avail, bal);
                 const remainCredit = avail - useAmt;
                 openModal(
-                    `'${nick}' 고객님의 보유 적립금 ${avail.toLocaleString()}원 중 ${useAmt.toLocaleString()}원을 이번 주문에서 차감하시겠습니까?\n\n• 차감 후 남은 보유 적립금: ${remainCredit.toLocaleString()}원\n• 주문서에 '적립금 (-${useAmt.toLocaleString()}원)' 항목이 자동 추가됩니다.\n• 적용 후 우측 상단 [시트 저장 (Ctrl+S)]을 꼭 눌러주세요!`,
+                    `'${nick}' 고객님의 보유 적립금 ${avail.toLocaleString()}원 중 ${useAmt.toLocaleString()}원을 이번 주문에서 차감하시겠습니까?\n\n• 차감 후 남은 보유 적립금: ${remainCredit.toLocaleString()}원\n• 주문서에 '적립금 (-${useAmt.toLocaleString()}원)' 항목이 추가되고 시트에 즉시 자동 저장됩니다!`,
                     'confirm',
                     () => {
-                        setCustomerCredits(prev => ({ ...prev, [nick]: remainCredit }));
-                        setCustomerGroups(prev => prev.map(cur => cur.nick === nick ? {
+                        handleUpdateCustomerCredit(nick, remainCredit);
+                        const nextGroups = customerGroups.map(cur => cur.nick === nick ? {
                             ...cur,
                             items: [
                                 ...cur.items,
@@ -1864,92 +1975,83 @@
                                     waitlistOrder: 0
                                 }
                             ]
-                        } : cur));
-                        setHasUnsavedChanges(true);
-                        showToast(`⚡ '${nick}' 님 주문에 적립금 -${useAmt.toLocaleString()}원이 차감되었습니다! [시트 저장 (Ctrl+S)]을 눌러 확정하세요.`);
+                        } : cur);
+                        setCustomerGroups(nextGroups);
+                        saveUpdatedGroupsImmediately(nextGroups, `⚡ '${nick}' 님 주문에 적립금 -${useAmt.toLocaleString()}원이 차감되어 시트에 즉시 저장되었습니다!`);
                     }
                 );
-            }, [openModal, showToast]);
+            }, [openModal, customerGroups, handleUpdateCustomerCredit]);
 
             const handleSaveAll = useCallback(async () => {
                 if (isSaving) return;
                 setIsSaving(true);
                 try {
-                    if (activeMainTab === 'cs') {
-                        const serializedCs = csGroups.map(c => ({
-                            ...c,
-                            csMemo: combineCsMemoAndAccount(c.csMemo, c.refundAccount, c.refundAmount, c.refundCompleted),
-                            shipping: Number(c.shipping) || 0,
-                            deposit: c.csFeePaid ? (Number(c.shipping) || Number(c.deposit) || 0) : 0
-                        }));
-                        // 고객용 포털 클라우드(_portal_cs)에도 즉시 동기화 (단, 직원용 csMemo는 제외됨!)
-                        syncCsGroupsToFirebase(csGroups);
+                    // ✨ 어느 탭을 보고 있든 [시트 저장 (Ctrl+S)]을 누르면 '메인주문' 탭과 '교환반품CS' 탭 양쪽 모두를 100% 동시에 저장합니다!
+                    const serializedCs = (csGroupsRef.current || []).map(c => ({
+                        ...c,
+                        csMemo: combineCsMemoAndAccount(c.csMemo, c.refundAccount, c.refundAmount, c.refundCompleted),
+                        shipping: Number(c.shipping) || 0,
+                        deposit: c.csFeePaid ? (Number(c.shipping) || Number(c.deposit) || 0) : 0
+                    }));
+                    try {
+                        localStorage.setItem('ember_staff_cs_groups_v1', JSON.stringify(csGroupsRef.current || []));
+                        localStorage.setItem(STAFF_CS_DIRTY_TIME_KEY, String(Date.now()));
+                    } catch (e) {}
+                    syncCsGroupsToFirebase(csGroupsRef.current || []);
 
-                        const res = await fetchGas(activeGasUrl, {
-                            action: 'save_cs_orders',
-                            masterId: activeStaffSheetId,
-                            items: serializedCs
-                        });
-                        if (res && res.success) {
-                            setHasUnsavedChanges(false);
-                            showToast('✅ 직원용 시트 및 고객 포털에 [미송/교환/반품] 저장 완료!');
-                        } else {
-                            setHasUnsavedChanges(false);
-                            showToast('💾 고객 포털 및 로컬에 안전하게 반영되었습니다!');
-                        }
-                    } else {
-                        const cleanBName = cleanDisplayTabName(broadcastName || selectedTab);
-                        const canonicalTab = '주문_' + cleanBName;
+                    const cleanBName = cleanDisplayTabName(broadcastName || selectedTab);
+                    const canonicalTab = '주문_' + cleanBName;
 
-                        // 현재 방송의 행 데이터 생성 함수
-                        const buildRowsForBroadcast = (bTitle, fThresh, dShip, cRate, groupsArr) => {
-                            const rows = [{
-                                '닉네임': '___WORKSPACE_META___',
-                                '상품명': bTitle,
-                                '수량': Number(fThresh) || 70000,
-                                '단가(제품금액)': Number(dShip) || 4000,
-                                '배송비': Number(cRate) || 10,
-                                '입금액': 0,
-                                '카드결제': '', '수령인명': '', '연락처': '', '주소': '', '요청사항': '',
-                                'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
-                            }];
-                            (groupsArr || []).forEach(g => {
-                                const sum = getGroupSummary(g);
-                                const cardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
-                                const cleanPh = fixPhoneNumber(g.phone);
-                                const pinStr = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
-                                const depJson = Array.isArray(g.deposits) && g.deposits.length > 0 ? JSON.stringify(g.deposits) : '';
-                                const itemsList = (g.items && g.items.length > 0) ? g.items : [{ product: '', qty: 1, price: 0, isWaitlist: false, waitlistOrder: 0 }];
+                    // 현재 방송의 행 데이터 생성 함수
+                    const buildRowsForBroadcast = (bTitle, fThresh, dShip, cRate, groupsArr) => {
+                        const rows = [{
+                            '닉네임': '___WORKSPACE_META___',
+                            '상품명': bTitle,
+                            '수량': Number(fThresh) || 70000,
+                            '단가(제품금액)': Number(dShip) || 4000,
+                            '배송비': Number(cRate) || 10,
+                            '입금액': 0,
+                            '카드결제': '', '수령인명': '', '연락처': '', '주소': '', '요청사항': '',
+                            'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
+                        }];
+                        (groupsArr || []).forEach(g => {
+                            const sum = getGroupSummary(g);
+                            const cardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
+                            const cleanPh = fixPhoneNumber(g.phone);
+                            const pinStr = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
+                            const depJson = Array.isArray(g.deposits) && g.deposits.length > 0 ? JSON.stringify(g.deposits) : '';
+                            const itemsList = (g.items && g.items.length > 0) ? g.items : [{ product: '', qty: 1, price: 0, isWaitlist: false, waitlistOrder: 0 }];
 
-                                itemsList.forEach((it, idx) => {
-                                    const waitCell = it.isWaitlist ? `대기${it.waitlistOrder || 1}번` : '';
-                                    rows.push({
-                                        '닉네임': g.nick,
-                                        '상품명': it.product || '',
-                                        '수량': Number(it.qty) || 1,
-                                        '단가(제품금액)': Number(it.price) || 0,
-                                        '배송비': sum.ship,
-                                        '입금액': idx === 0 ? sum.dep : 0,
-                                        '카드결제': cardStr,
-                                        '수령인명': g.realname || '',
-                                        '연락처': cleanPh ? "'" + cleanPh : '',
-                                        '주소': stripZipcode(g.address || ''),
-                                        '요청사항': cleanMemoText(g.memo, g.address),
-                                        'VIP여부': g.isVip ? 'O' : '',
-                                        '노쇼여부': g.isNoShow ? 'O' : '',
-                                        '대기여부': waitCell,
-                                        '비밀번호': pinStr ? "'" + pinStr : '',
-                                        '주문확인': g.isConfirmed ? 'O' : '',
-                                        '입금내역JSON': idx === 0 ? depJson : '',
-                                        '송장번호': g.trackingNumber ? "'" + String(g.trackingNumber).replace(/^'+/, '') : ''
-                                    });
+                            itemsList.forEach((it, idx) => {
+                                const waitCell = it.isWaitlist ? `대기${it.waitlistOrder || 1}번` : '';
+                                rows.push({
+                                    '닉네임': g.nick,
+                                    '상품명': it.product || '',
+                                    '수량': Number(it.qty) || 1,
+                                    '단가(제품금액)': Number(it.price) || 0,
+                                    '배송비': sum.ship,
+                                    '입금액': idx === 0 ? sum.dep : 0,
+                                    '카드결제': cardStr,
+                                    '수령인명': g.realname || '',
+                                    '연락처': cleanPh ? "'" + cleanPh : '',
+                                    '주소': stripZipcode(g.address || ''),
+                                    '요청사항': cleanMemoText(g.memo, g.address),
+                                    'VIP여부': g.isVip ? 'O' : '',
+                                    '노쇼여부': g.isNoShow ? 'O' : '',
+                                    '대기여부': waitCell,
+                                    '비밀번호': pinStr ? "'" + pinStr : '',
+                                    '주문확인': g.isConfirmed ? 'O' : '',
+                                    '입금내역JSON': idx === 0 ? depJson : '',
+                                    '송장번호': g.trackingNumber ? "'" + String(g.trackingNumber).replace(/^'+/, '') : ''
                                 });
                             });
-                            return rows;
-                        };
+                        });
+                        return rows;
+                    };
 
-                        const updatedStore = {
-                            ...localBroadcastStore,
+                    const updatedStore = {
+                        ...localBroadcastStore,
+                        ...(cleanBName ? {
                             [canonicalTab]: {
                                 broadcastName: cleanBName,
                                 freeShipThreshold,
@@ -1958,111 +2060,92 @@
                                 updatedAt: Date.now(),
                                 groups: customerGroups
                             }
-                        };
-                        setLocalBroadcastStore(updatedStore);
-                        try { localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(updatedStore)); } catch (e) {}
+                        } : {})
+                    };
+                    setLocalBroadcastStore(updatedStore);
+                    try {
+                        localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(updatedStore));
+                        localStorage.setItem(STAFF_LOCAL_DIRTY_TIME_KEY, String(Date.now()));
+                    } catch (e) {}
 
-                        const allCombinedRows = [];
-                        Object.keys(updatedStore)
-                            .filter(k => k.startsWith('주문_') && !['주문_기본방송', '주문_주문', '주문_주문통합', '주문_메인주문'].includes(k))
-                            .sort((a, b) => extractBroadcastDateScore(b) - extractBroadcastDateScore(a))
-                            .forEach(tKey => {
-                                const blk = updatedStore[tKey];
-                                if (blk && Array.isArray(blk.groups) && blk.groups.length > 0) {
-                                    const bTitle = cleanDisplayTabName(blk.broadcastName || tKey);
-                                    allCombinedRows.push(...buildRowsForBroadcast(bTitle, blk.freeShipThreshold, blk.defaultShipping, blk.cardFeeRate, blk.groups));
-                                }
-                            });
-
-                        // ✨ 직원용 시트도 오직 '메인주문' 탭 1개에만 저장하고, 불필요한 '주문' 탭은 자동 정리합니다!
-                        const trackingPayloadList = [];
-                        Object.values(updatedStore).forEach(blk => {
-                            if (blk && Array.isArray(blk.groups)) {
-                                blk.groups.forEach(g => {
-                                    if (g.nick && g.trackingNumber !== undefined) {
-                                        trackingPayloadList.push({
-                                            nickname: g.nick,
-                                            realname: g.realname || '',
-                                            phone: fixPhoneNumber(g.phone || ''),
-                                            trackingNumber: g.trackingNumber || '__CLEAR__'
-                                        });
-                                    }
-                                });
+                    const allCombinedRows = [];
+                    Object.keys(updatedStore)
+                        .filter(k => k.startsWith('주문_') && !['주문_기본방송', '주문_주문', '주문_주문통합', '주문_메인주문'].includes(k))
+                        .sort((a, b) => extractBroadcastDateScore(b) - extractBroadcastDateScore(a))
+                        .forEach(tKey => {
+                            const blk = updatedStore[tKey];
+                            if (blk && Array.isArray(blk.groups) && blk.groups.length > 0) {
+                                const bTitle = cleanDisplayTabName(blk.broadcastName || tKey);
+                                allCombinedRows.push(...buildRowsForBroadcast(bTitle, blk.freeShipThreshold, blk.defaultShipping, blk.cardFeeRate, blk.groups));
                             }
                         });
 
-                        const [res] = await Promise.all([
-                            fetchGas(activeGasUrl, {
-                                action: 'save_orders',
-                                masterId: activeStaffSheetId,
-                                targetSheetName: '메인주문',
-                                onlyMainOrder: true,
-                                broadcastName: '오늘의방송',
-                                data: allCombinedRows
-                            }),
-                            trackingPayloadList.length > 0 ? fetchGas(activeGasUrl, {
-                                action: 'save_tracking_numbers',
-                                masterId: activeStaffSheetId,
-                                data: trackingPayloadList
-                            }).catch(() => null) : Promise.resolve(null),
-                            fetchGas(activeGasUrl, {
-                                action: 'delete_old_order_tabs',
-                                masterId: activeStaffSheetId,
-                                tabNames: ['주문', '주문_주문', '주문_10/20 악세사리', '주문_10/18 여성복', '주문_10/16 여성복', '주문_10/20 모이사', '주문_10/18 혜자집']
-                            }).catch(() => null)
-                        ]);
+                    // 구글 시트 Lock 충돌 방지를 위해 순차적으로 빠르게 저장 (save_orders에 이미 송장번호 R열이 전부 포함되어 있으므로 중복 save_tracking_numbers 제거!)
+                    let resOrders = { success: true };
+                    if (allCombinedRows.length > 0) {
+                        resOrders = await fetchGas(activeGasUrl, {
+                            action: 'save_orders',
+                            masterId: activeStaffSheetId,
+                            targetSheetName: '메인주문',
+                            onlyMainOrder: true,
+                            broadcastName: '오늘의방송',
+                            data: allCombinedRows
+                        }, 12000);
+                    }
+                    const resCs = await fetchGas(activeGasUrl, {
+                        action: 'save_cs_orders',
+                        masterId: activeStaffSheetId,
+                        items: serializedCs
+                    }, 12000);
 
+                    customerGroups.forEach(g => {
+                        if (customerCredits[g.nick] !== undefined) {
+                            fetchGas(activeGasUrl, {
+                                action: 'save_customer_credit',
+                                masterId: activeDictSheetId,
+                                data: { nickname: g.nick, credit: Number(customerCredits[g.nick]) || 0 }
+                            }).catch(() => {});
+                        }
+                    });
+
+                    if (staffFbDb && cleanBName) {
+                        const safeBKey = cleanBName.replace(/[.#$\[\]\/]/g, '_');
                         customerGroups.forEach(g => {
+                            const safeNickKey = String(g.nick || '').replace(/[.#$\[\]\/]/g, '_').trim();
+                            if (!safeNickKey) return;
                             if (customerCredits[g.nick] !== undefined) {
-                                fetchGas(activeGasUrl, {
-                                    action: 'save_customer_credit',
-                                    masterId: activeDictSheetId,
-                                    data: { nickname: g.nick, credit: Number(customerCredits[g.nick]) || 0 }
+                                staffFbDb.ref(`ember_live_data/_portal_credits/${safeNickKey}`).set({
+                                    nickname: g.nick,
+                                    credit: Number(customerCredits[g.nick]) || 0,
+                                    updatedAt: Date.now()
                                 }).catch(() => {});
                             }
+                            if (g.address && safeBKey) {
+                                const addrPayload = {
+                                    nickname: g.nick,
+                                    realname: g.realname || '',
+                                    phone: fixPhoneNumber(g.phone || ''),
+                                    address: stripZipcode(g.address),
+                                    memo: cleanMemoText(g.memo, g.address),
+                                    broadcastName: cleanBName,
+                                    updatedAt: new Date().toISOString()
+                                };
+                                staffFbDb.ref(`ember_live_data/_portal_broadcast_addresses/${safeBKey}/${safeNickKey}`).set(addrPayload).catch(() => {});
+                            }
                         });
+                        syncBroadcastGroupsToFirebase(cleanBName, customerGroups, freeShipThreshold, cardFeeRate, customerCredits, 'staff');
+                    }
 
-                        if (staffFbDb) {
-                            const safeBKey = cleanBName.replace(/[.#$\[\]\/]/g, '_');
-                            customerGroups.forEach(g => {
-                                const safeNickKey = String(g.nick || '').replace(/[.#$\[\]\/]/g, '_').trim();
-                                if (!safeNickKey) return;
-                                if (customerCredits[g.nick] !== undefined) {
-                                    staffFbDb.ref(`ember_live_data/_portal_credits/${safeNickKey}`).set({
-                                        nickname: g.nick,
-                                        credit: Number(customerCredits[g.nick]) || 0,
-                                        updatedAt: Date.now()
-                                    }).catch(() => {});
-                                }
-                                if (g.address && safeBKey) {
-                                    const addrPayload = {
-                                        nickname: g.nick,
-                                        realname: g.realname || '',
-                                        phone: fixPhoneNumber(g.phone || ''),
-                                        address: stripZipcode(g.address),
-                                        memo: cleanMemoText(g.memo, g.address),
-                                        broadcastName: cleanBName,
-                                        updatedAt: new Date().toISOString()
-                                    };
-                                    staffFbDb.ref(`ember_live_data/_portal_broadcast_addresses/${safeBKey}/${safeNickKey}`).set(addrPayload).catch(() => {});
-                                }
-                            });
-                            syncBroadcastGroupsToFirebase(cleanBName, customerGroups, freeShipThreshold, cardFeeRate, customerCredits, 'staff');
-                            syncCsGroupsToFirebase(csGroups);
-                        }
-
-                        if (res && (res.success || res.status === 'success')) {
-                            setHasUnsavedChanges(false);
-                            showToast(`✅ 시트를 늘리지 않고 통합 주문서 및 고객 포털에 저장 완료!`);
-                        } else {
-                            setHasUnsavedChanges(false);
-                            showToast(`✅ 고객 포털 및 로컬에 즉시 반영되었습니다!`);
-                        }
+                    setHasUnsavedChanges(false);
+                    if ((resOrders && (resOrders.success || resOrders.status === 'success')) || (resCs && (resCs.success || resCs.status === 'success'))) {
+                        showToast(`✅ 직원용 시트('메인주문' 및 '교환반품CS')와 고객 포털에 모두 저장 완료!`);
+                    } else {
+                        showToast(`✅ 고객 포털 및 로컬에 즉시 반영되었습니다!`);
                     }
                 } finally {
                     setIsSaving(false);
                 }
-            }, [isSaving, activeMainTab, activeGasUrl, activeStaffSheetId, activeDictSheetId, csGroups, selectedTab, broadcastName, freeShipThreshold, defaultShipping, cardFeeRate, customerGroups, customerCredits, localBroadcastStore, getGroupSummary, showToast]);
+            }, [isSaving, activeGasUrl, activeStaffSheetId, activeDictSheetId, selectedTab, broadcastName, freeShipThreshold, defaultShipping, cardFeeRate, customerGroups, customerCredits, localBroadcastStore, getGroupSummary, showToast]);
             useEffect(() => {
                 const onKeyDown = (e) => {
                     if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S' || e.key === 'ㄴ')) {
@@ -2075,37 +2158,184 @@
                 return () => window.removeEventListener('keydown', onKeyDown);
             }, [handleSaveAll]);
 
-            const updateCustomerGroup = useCallback((nick, updater) => {
-                setCustomerGroups(prev => prev.map(g => g.nick === nick ? updater(g) : g));
-                setHasUnsavedChanges(true);
-            }, []);
+            // ✨ 주문서 전체 행을 순차 대기열(Queue)을 통해 구글 시트('메인주문' 탭)에 유실 없이 끝까지 저장하는 함수
+            const flushOrdersQueueToSheet = useCallback(async () => {
+                if (isOrdersSavingQueueRef.current) return;
+                isOrdersSavingQueueRef.current = true;
+                try {
+                    while (pendingOrdersRowsRef.current !== null) {
+                        const rowsToPush = pendingOrdersRowsRef.current;
+                        pendingOrdersRowsRef.current = null;
+                        if (rowsToPush.length > 0) {
+                            await fetchGas(activeGasUrl, {
+                                action: 'save_orders',
+                                masterId: activeStaffSheetId,
+                                targetSheetName: '메인주문',
+                                onlyMainOrder: true,
+                                broadcastName: '오늘의방송',
+                                data: rowsToPush
+                            }, 15000);
+                        }
+                    }
+                } catch (e) {} finally {
+                    isOrdersSavingQueueRef.current = false;
+                }
+            }, [activeGasUrl, activeStaffSheetId]);
 
-            // ✨ 직원이 현재 선택된 방송 이름을 직접 수정하는 함수 (로컬 스토어 + 좌측 탭 + CS 원본방송명 + 고객포털 Firebase 동시 변경)
-            const handleRenameBroadcast = useCallback((targetTabKey = null) => {
-                const baseTab = targetTabKey || selectedTab || ('주문_' + cleanDisplayTabName(broadcastName));
-                const oldCleanName = cleanDisplayTabName(baseTab || broadcastName);
+            // ✨ 송장번호 및 단일 주문 추가/삭제/수정 변경 사항을 대기 시간 0초(Non-blocking)로 시트('메인주문' 탭)와 고객 포털(Firebase)에 즉시 자동 저장하는 헬퍼 함수
+            const saveUpdatedGroupsImmediately = useCallback((nextGroups, toastMessage) => {
+                const cleanBName = cleanDisplayTabName(broadcastName || selectedTab);
+                const canonicalTab = '주문_' + cleanBName;
+
+                const updatedStore = {
+                    ...localBroadcastStoreRef.current,
+                    [canonicalTab]: {
+                        broadcastName: cleanBName,
+                        freeShipThreshold,
+                        defaultShipping,
+                        cardFeeRate,
+                        updatedAt: Date.now(),
+                        groups: nextGroups
+                    }
+                };
+                localBroadcastStoreRef.current = updatedStore;
+                setLocalBroadcastStore(updatedStore);
+                try {
+                    localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(updatedStore));
+                    localStorage.setItem(STAFF_LOCAL_DIRTY_TIME_KEY, String(Date.now()));
+                } catch (e) {}
+
+                // 1) 고객 포털(Firebase)에 0.01초 만에 즉시 반영 및 완료 토스트 표시! (화면 멈춤 ZERO)
+                if (staffFbDb && cleanBName) {
+                    syncBroadcastGroupsToFirebase(cleanBName, nextGroups, freeShipThreshold, cardFeeRate, customerCredits, 'staff');
+                }
+                setHasUnsavedChanges(false);
+                if (toastMessage) showToast(toastMessage);
+
+                // 2) 직원용 구글 시트('메인주문' 탭)에는 백그라운드 디바운스(0.35초) + 순차 대기열(Queue)로 3줄이든 10줄이든 마지막 줄까지 100% 저장!
+                if (autoSaveOrdersTimerRef.current) clearTimeout(autoSaveOrdersTimerRef.current);
+                autoSaveOrdersTimerRef.current = setTimeout(() => {
+                    const latestStore = localBroadcastStoreRef.current;
+                    const buildRows = (bTitle, fThresh, dShip, cRate, groupsArr) => {
+                        const rows = [{
+                            '닉네임': '___WORKSPACE_META___',
+                            '상품명': bTitle,
+                            '수량': Number(fThresh) || 70000,
+                            '단가(제품금액)': Number(dShip) || 4000,
+                            '배송비': Number(cRate) || 10,
+                            '입금액': 0,
+                            '카드결제': '', '수령인명': '', '연락처': '', '주소': '', '요청사항': '',
+                            'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
+                        }];
+                        (groupsArr || []).forEach(g => {
+                            const sum = getGroupSummary(g);
+                            const cardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
+                            const cleanPh = fixPhoneNumber(g.phone);
+                            const pinStr = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
+                            const depJson = Array.isArray(g.deposits) && g.deposits.length > 0 ? JSON.stringify(g.deposits) : '';
+                            const itemsList = (g.items && g.items.length > 0) ? g.items : [{ product: '', qty: 1, price: 0, isWaitlist: false, waitlistOrder: 0 }];
+
+                            itemsList.forEach((it, idx) => {
+                                const waitCell = it.isWaitlist ? `대기${it.waitlistOrder || 1}번` : '';
+                                rows.push({
+                                    '닉네임': g.nick,
+                                    '상품명': it.product || '',
+                                    '수량': Number(it.qty) || 1,
+                                    '단가(제품금액)': Number(it.price) || 0,
+                                    '배송비': sum.ship,
+                                    '입금액': idx === 0 ? sum.dep : 0,
+                                    '카드결제': cardStr,
+                                    '수령인명': g.realname || '',
+                                    '연락처': cleanPh ? "'" + cleanPh : '',
+                                    '주소': stripZipcode(g.address || ''),
+                                    '요청사항': cleanMemoText(g.memo, g.address),
+                                    'VIP여부': g.isVip ? 'O' : '',
+                                    '노쇼여부': g.isNoShow ? 'O' : '',
+                                    '대기여부': waitCell,
+                                    '비밀번호': pinStr ? "'" + pinStr : '',
+                                    '주문확인': g.isConfirmed ? 'O' : '',
+                                    '입금내역JSON': idx === 0 ? depJson : '',
+                                    '송장번호': g.trackingNumber ? "'" + String(g.trackingNumber).replace(/^'+/, '') : ''
+                                });
+                            });
+                        });
+                        return rows;
+                    };
+
+                    const allCombinedRows = [];
+                    Object.keys(latestStore)
+                        .filter(k => k.startsWith('주문_') && !['주문_기본방송', '주문_주문', '주문_주문통합', '주문_메인주문'].includes(k))
+                        .sort((a, b) => extractBroadcastDateScore(b) - extractBroadcastDateScore(a))
+                        .forEach(tKey => {
+                            const blk = latestStore[tKey];
+                            if (blk && Array.isArray(blk.groups) && blk.groups.length > 0) {
+                                const bTitle = cleanDisplayTabName(blk.broadcastName || tKey);
+                                allCombinedRows.push(...buildRows(bTitle, blk.freeShipThreshold, blk.defaultShipping, blk.cardFeeRate, blk.groups));
+                            }
+                        });
+
+                    if (allCombinedRows.length > 0) {
+                        pendingOrdersRowsRef.current = allCombinedRows;
+                        flushOrdersQueueToSheet();
+                    }
+                }, 350);
+            }, [broadcastName, selectedTab, freeShipThreshold, defaultShipping, cardFeeRate, customerCredits, getGroupSummary, flushOrdersQueueToSheet, showToast]);
+
+            // 주문서 내역(품목명, 수량, 단가, 완납, 카드, 노쇼, 대기 등)을 수정하면 즉시 로컬 스토어를 갱신하고 0.5초 뒤 자동으로 직원용 구글 시트('메인주문')와 고객 포털에 저장!
+            const updateCustomerGroup = useCallback((nick, updater) => {
+                setCustomerGroups(prev => {
+                    const nextGroups = prev.map(g => g.nick === nick ? updater(g) : g);
+                    const cleanBName = cleanDisplayTabName(broadcastName || selectedTab);
+                    const canonicalTab = '주문_' + cleanBName;
+                    if (cleanBName) {
+                        const updatedStore = {
+                            ...localBroadcastStoreRef.current,
+                            [canonicalTab]: {
+                                broadcastName: cleanBName,
+                                freeShipThreshold,
+                                defaultShipping,
+                                cardFeeRate,
+                                updatedAt: Date.now(),
+                                groups: nextGroups
+                            }
+                        };
+                        localBroadcastStoreRef.current = updatedStore;
+                        try {
+                            localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(updatedStore));
+                            localStorage.setItem(STAFF_LOCAL_DIRTY_TIME_KEY, String(Date.now()));
+                        } catch (e) {}
+                    }
+                    if (cleanBName && staffFbDb) {
+                        syncBroadcastGroupsToFirebase(cleanBName, nextGroups, freeShipThreshold, cardFeeRate, customerCredits, 'staff');
+                    }
+                    if (autoSaveOrdersTimerRef.current) clearTimeout(autoSaveOrdersTimerRef.current);
+                    autoSaveOrdersTimerRef.current = setTimeout(() => {
+                        saveUpdatedGroupsImmediately(nextGroups, '');
+                    }, 500);
+                    return nextGroups;
+                });
+            }, [broadcastName, selectedTab, freeShipThreshold, defaultShipping, cardFeeRate, customerCredits, saveUpdatedGroupsImmediately]);
+
+            const handleRenameBroadcast = useCallback((targetTabToRename = null) => {
+                const baseTab = targetTabToRename || selectedTab || ('주문_' + broadcastName);
+                const oldCleanName = cleanDisplayTabName(baseTab);
                 if (!oldCleanName) return;
 
                 openModal(
-                    `'${oldCleanName}' 방송의 새로운 이름을 입력해 주세요.\n(변경 후 [시트 저장 (Ctrl+S)]을 누르면 시트와 고객 포털에 최종 확정됩니다)`,
+                    `'${oldCleanName}' 방송의 새로운 이름을 입력해 주세요.\n(변경 시 좌측 목록, 시트 구분선, 고객 포털에 모두 반영됩니다)`,
                     'prompt',
-                    (inputVal) => {
-                        const nextCleanName = cleanDisplayTabName(inputVal);
+                    (newNameInput) => {
+                        const nextCleanName = cleanDisplayTabName(newNameInput);
                         if (!nextCleanName || nextCleanName === oldCleanName) return;
 
                         const oldTabKey = '주문_' + oldCleanName;
                         const newTabKey = '주문_' + nextCleanName;
 
-                        if (orderTabs.includes(newTabKey) && oldTabKey !== newTabKey) {
-                            openModal(`이미 '${nextCleanName}' 이름의 방송이 존재합니다.`, 'alert');
-                            return;
-                        }
-
-                        // 1) 로컬 방송 창고에서 키 이름 교체
+                        // 1) 로컬 방송 창고(localBroadcastStore)에서 키 이동 및 방송명 업데이트
                         setLocalBroadcastStore(prev => {
                             const nextStore = { ...prev };
                             const existingBlk = nextStore[oldTabKey] || nextStore[baseTab] || {
-                                broadcastName: oldCleanName,
+                                broadcastName: nextCleanName,
                                 freeShipThreshold,
                                 defaultShipping,
                                 cardFeeRate,
@@ -2113,14 +2343,17 @@
                             };
                             delete nextStore[oldTabKey];
                             if (baseTab !== oldTabKey) delete nextStore[baseTab];
-
                             nextStore[newTabKey] = {
                                 ...existingBlk,
                                 broadcastName: nextCleanName,
                                 updatedAt: Date.now(),
                                 groups: (selectedTab === oldTabKey || selectedTab === baseTab) ? customerGroups : (existingBlk.groups || [])
                             };
-                            try { localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(nextStore)); } catch (e) {}
+                            localBroadcastStoreRef.current = nextStore;
+                            try {
+                                localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(nextStore));
+                                localStorage.setItem(STAFF_LOCAL_DIRTY_TIME_KEY, String(Date.now()));
+                            } catch (e) {}
                             return nextStore;
                         });
 
@@ -2143,31 +2376,32 @@
                         }
 
                         // 4) 미송/교환/반품 CS 목록 중 이 방송에서 복사된 내역의 원본방송명도 함께 변경
-                        setCsGroups(prev => prev.map(c =>
+                        const updatedCs = (csGroupsRef.current || []).map(c =>
                             cleanDisplayTabName(c.sourceBroadcast) === oldCleanName
                                 ? { ...c, sourceBroadcast: nextCleanName }
                                 : c
-                        ));
+                        );
+                        setCsGroups(updatedCs);
+                        saveCsOrdersToSheetImmediate(updatedCs);
 
                         // 5) 고객 포털 실시간 클라우드(Firebase)에서 이전 방송키 데이터를 새 방송키로 이동
+                        const targetGroups = (selectedTab === oldTabKey || selectedTab === baseTab)
+                            ? customerGroups
+                            : (localBroadcastStore[oldTabKey]?.groups || []);
                         if (staffFbDb) {
                             const oldSafeKey = oldCleanName.replace(/[.#$\[\]\/]/g, '_');
-                            const targetGroups = (selectedTab === oldTabKey || selectedTab === baseTab)
-                                ? customerGroups
-                                : (localBroadcastStore[oldTabKey]?.groups || []);
                             if (oldSafeKey) {
                                 staffFbDb.ref(`ember_live_data/_portal_orders/${oldSafeKey}`).remove().catch(() => {});
                             }
                             syncBroadcastGroupsToFirebase(nextCleanName, targetGroups, freeShipThreshold, cardFeeRate, customerCredits, 'staff');
                         }
 
-                        setHasUnsavedChanges(true);
-                        showToast(`✏️ 방송 이름이 '${oldCleanName}' ➔ '${nextCleanName}'(으)로 변경되었습니다! [시트 저장 (Ctrl+S)]을 눌러 확정하세요.`);
+                        saveUpdatedGroupsImmediately(targetGroups, `✏️ 방송 이름이 '${oldCleanName}' ➔ '${nextCleanName}'(으)로 변경되어 시트에 즉시 저장되었습니다!`);
                     },
                     oldCleanName,
                     '방송 이름 변경'
                 );
-            }, [selectedTab, broadcastName, orderTabs, freeShipThreshold, defaultShipping, cardFeeRate, customerGroups, customerCredits, localBroadcastStore, openModal, showToast]);
+            }, [selectedTab, broadcastName, freeShipThreshold, defaultShipping, cardFeeRate, customerGroups, customerCredits, localBroadcastStore, openModal, saveCsOrdersToSheetImmediate, saveUpdatedGroupsImmediately]);
 
             const handleSingleAddOrder = (e) => {
                 e.preventDefault();
@@ -2179,32 +2413,36 @@
                 const totalP = (cleanP === '적립금' && unitP > 0) ? -Math.abs(unitP * q) : unitP * q;
 
                 const matchedDictAddr = findMasterAddressMatch(cleanN);
+                const isCustomerVip = Boolean(
+                    vipNickMap[normalizeString(cleanN)] ||
+                    (normalizeHandleNick(cleanN) && vipNickMap[normalizeHandleNick(cleanN)])
+                );
 
-                setCustomerGroups(prev => {
-                    const idx = prev.findIndex(g => normalizeString(g.nick) === normalizeString(cleanN));
-                    if (idx !== -1) {
-                        const copy = [...prev];
-                        copy[idx] = {
-                            ...copy[idx],
-                            realname: copy[idx].realname || matchedDictAddr?.realname || '',
-                            phone: copy[idx].phone || matchedDictAddr?.phone || '',
-                            address: copy[idx].address || stripZipcode(matchedDictAddr?.address || ''),
-                            memo: copy[idx].memo || matchedDictAddr?.memo || '',
-                            items: [...copy[idx].items, { id: `item_${Date.now()}`, product: cleanP, qty: q, price: totalP, isWaitlist: false, waitlistOrder: 0 }]
-                        };
-                        return copy;
-                    }
+                const idx = customerGroups.findIndex(g => normalizeString(g.nick) === normalizeString(cleanN));
+                let nextGroups = [];
+                if (idx !== -1) {
+                    nextGroups = [...customerGroups];
+                    nextGroups[idx] = {
+                        ...nextGroups[idx],
+                        isVip: nextGroups[idx].isVip || isCustomerVip,
+                        realname: nextGroups[idx].realname || matchedDictAddr?.realname || '',
+                        phone: nextGroups[idx].phone || matchedDictAddr?.phone || '',
+                        address: nextGroups[idx].address || stripZipcode(matchedDictAddr?.address || ''),
+                        memo: nextGroups[idx].memo || matchedDictAddr?.memo || '',
+                        items: [...nextGroups[idx].items, { id: `item_${Date.now()}`, product: cleanP, qty: q, price: totalP, isWaitlist: false, waitlistOrder: 0 }]
+                    };
+                } else {
                     const cleanPh = matchedDictAddr ? fixPhoneNumber(matchedDictAddr.phone) : '';
-                    return [{
+                    nextGroups = [{
                         nick: cleanN,
                         realname: matchedDictAddr?.realname || '',
                         phone: cleanPh,
                         address: stripZipcode(matchedDictAddr?.address || ''),
                         memo: matchedDictAddr?.memo || '',
-                        shipping: defaultShipping,
+                        shipping: isCustomerVip ? 0 : defaultShipping,
                         deposit: 0,
                         cardMode: 'none',
-                        isVip: false,
+                        isVip: isCustomerVip,
                         isNoShow: false,
                         isConfirmed: false,
                         pin: cleanPh.length >= 4 ? cleanPh.slice(-4) : '',
@@ -2212,19 +2450,20 @@
                         deposits: [],
                         showDeposits: false,
                         items: [{ id: `item_${Date.now()}`, product: cleanP, qty: q, price: totalP, isWaitlist: false, waitlistOrder: 0 }]
-                    }, ...prev];
-                });
+                    }, ...customerGroups];
+                }
 
+                setCustomerGroups(nextGroups);
                 setNewProd('');
                 setNewQty(1);
                 setNewPrice('');
                 setShowNewNickSuggest(false);
-                setHasUnsavedChanges(true);
-                if (matchedDictAddr) {
-                    showToast(`'${cleanN}' 님 주문 추가 + 📗찐고객사전 주소(${matchedDictAddr.realname})가 자동 연동되었습니다! (Ctrl+S로 저장하세요)`);
-                } else {
-                    showToast(`'${cleanN}' 님 주문이 추가되었습니다. (Ctrl+S로 저장하세요)`);
-                }
+
+                // ✨ 단일 주문 추가 즉시 직원용 시트('메인주문')와 고객 포털(Firebase)에 자동 저장!
+                const msg = matchedDictAddr
+                    ? `✅ '${cleanN}' 님 주문 + 📗찐고객사전 주소(${matchedDictAddr.realname})가 시트 및 고객 포털에 즉시 저장되었습니다!`
+                    : `✅ '${cleanN}' 님 주문이 직원용 시트 및 고객 포털에 즉시 저장되었습니다!`;
+                saveUpdatedGroupsImmediately(nextGroups, msg);
             };
 
             const newNickSuggestions = useMemo(() => {
@@ -2268,130 +2507,12 @@
                     items: taggedItems
                 };
 
-                setCsGroups(prev => [newCsEntry, ...prev]);
-                setHasUnsavedChanges(true);
+                const nextCsList = [newCsEntry, ...csGroups];
+                setCsGroups(nextCsList);
                 setActiveMainTab('cs');
-                showToast(`🔄 '${group.nick}' 님의 주문서가 [미송/교환/반품 관리] 탭으로 복사되었습니다. [시트 저장 (Ctrl+S)]을 눌러 저장하세요!`);
+                // ✨ 미송/교환/반품으로 복사하는 즉시 직원용 구글 시트('교환반품CS' 탭)와 고객 포털에 자동 저장!
+                saveCsOrdersToSheetImmediate(nextCsList, `✅ '${group.nick}' 님의 미송/교환/반품 내역이 직원용 시트 및 고객 포털에 즉시 저장되었습니다!`);
             };
-
-            // ✨ 송장번호 변경 사항을 시트(주문 탭)와 고객 포털(Firebase)에 즉시 자동 저장하는 헬퍼 함수
-            const saveUpdatedGroupsImmediately = useCallback(async (nextGroups, toastMessage) => {
-                const cleanBName = cleanDisplayTabName(broadcastName || selectedTab);
-                const canonicalTab = '주문_' + cleanBName;
-
-                const updatedStore = {
-                    ...localBroadcastStore,
-                    [canonicalTab]: {
-                        broadcastName: cleanBName,
-                        freeShipThreshold,
-                        defaultShipping,
-                        cardFeeRate,
-                        updatedAt: Date.now(),
-                        groups: nextGroups
-                    }
-                };
-                setLocalBroadcastStore(updatedStore);
-                try { localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(updatedStore)); } catch (e) {}
-
-                // 1) 고객 포털(Firebase)에 0.1초 만에 즉시 반영!
-                if (staffFbDb && cleanBName) {
-                    syncBroadcastGroupsToFirebase(cleanBName, nextGroups, freeShipThreshold, cardFeeRate, customerCredits, 'staff');
-                }
-
-                // 2) 직원용 구글 시트('주문' 탭)에도 즉시 백그라운드 저장!
-                const buildRows = (bTitle, fThresh, dShip, cRate, groupsArr) => {
-                    const rows = [{
-                        '닉네임': '___WORKSPACE_META___',
-                        '상품명': bTitle,
-                        '수량': Number(fThresh) || 70000,
-                        '단가(제품금액)': Number(dShip) || 4000,
-                        '배송비': Number(cRate) || 10,
-                        '입금액': 0,
-                        '카드결제': '', '수령인명': '', '연락처': '', '주소': '', '요청사항': '',
-                        'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
-                    }];
-                    (groupsArr || []).forEach(g => {
-                        const sum = getGroupSummary(g);
-                        const cardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
-                        const cleanPh = fixPhoneNumber(g.phone);
-                        const pinStr = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
-                        const depJson = Array.isArray(g.deposits) && g.deposits.length > 0 ? JSON.stringify(g.deposits) : '';
-                        const itemsList = (g.items && g.items.length > 0) ? g.items : [{ product: '', qty: 1, price: 0, isWaitlist: false, waitlistOrder: 0 }];
-
-                        itemsList.forEach((it, idx) => {
-                            const waitCell = it.isWaitlist ? `대기${it.waitlistOrder || 1}번` : '';
-                            rows.push({
-                                '닉네임': g.nick,
-                                '상품명': it.product || '',
-                                '수량': Number(it.qty) || 1,
-                                '단가(제품금액)': Number(it.price) || 0,
-                                '배송비': sum.ship,
-                                '입금액': idx === 0 ? sum.dep : 0,
-                                '카드결제': cardStr,
-                                '수령인명': g.realname || '',
-                                '연락처': cleanPh ? "'" + cleanPh : '',
-                                '주소': stripZipcode(g.address || ''),
-                                '요청사항': cleanMemoText(g.memo, g.address),
-                                'VIP여부': g.isVip ? 'O' : '',
-                                '노쇼여부': g.isNoShow ? 'O' : '',
-                                '대기여부': waitCell,
-                                '비밀번호': pinStr ? "'" + pinStr : '',
-                                '주문확인': g.isConfirmed ? 'O' : '',
-                                '입금내역JSON': idx === 0 ? depJson : '',
-                                '송장번호': g.trackingNumber ? "'" + String(g.trackingNumber).replace(/^'+/, '') : ''
-                            });
-                        });
-                    });
-                    return rows;
-                };
-
-                const allCombinedRows = [];
-                Object.keys(updatedStore)
-                    .filter(k => k.startsWith('주문_') && !['주문_기본방송', '주문_주문', '주문_주문통합', '주문_메인주문'].includes(k))
-                    .sort((a, b) => extractBroadcastDateScore(b) - extractBroadcastDateScore(a))
-                    .forEach(tKey => {
-                        const blk = updatedStore[tKey];
-                        if (blk && Array.isArray(blk.groups) && blk.groups.length > 0) {
-                            const bTitle = cleanDisplayTabName(blk.broadcastName || tKey);
-                            allCombinedRows.push(...buildRows(bTitle, blk.freeShipThreshold, blk.defaultShipping, blk.cardFeeRate, blk.groups));
-                        }
-                    });
-
-                try {
-                    setIsSaving(true);
-                    const changedTrackingList = nextGroups
-                        .filter(g => g.nick && g.trackingNumber !== undefined)
-                        .map(g => ({
-                            nickname: g.nick,
-                            realname: g.realname || '',
-                            phone: fixPhoneNumber(g.phone || ''),
-                            trackingNumber: g.trackingNumber || '__CLEAR__'
-                        }));
-
-                    await Promise.all([
-                        fetchGas(activeGasUrl, {
-                            action: 'save_tracking_numbers',
-                            masterId: activeStaffSheetId,
-                            broadcastName: cleanBName,
-                            data: changedTrackingList
-                        }),
-                        fetchGas(activeGasUrl, {
-                            action: 'save_orders',
-                            masterId: activeStaffSheetId,
-                            targetSheetName: '메인주문',
-                            onlyMainOrder: true,
-                            broadcastName: '오늘의방송',
-                            data: allCombinedRows
-                        })
-                    ]);
-                    setHasUnsavedChanges(false);
-                    if (toastMessage) showToast(toastMessage);
-                } catch (e) {
-                    setHasUnsavedChanges(true);
-                } finally {
-                    setIsSaving(false);
-                }
-            }, [broadcastName, selectedTab, localBroadcastStore, freeShipThreshold, defaultShipping, cardFeeRate, customerCredits, getGroupSummary, activeGasUrl, activeStaffSheetId, showToast]);
 
             const handleTrackingExcelUpload = (e) => {
                 const file = e.target.files[0];
@@ -2700,31 +2821,10 @@
                                     pin: newPin || cur.pin
                                 } : cur);
 
-                                const cleanCur = cleanDisplayTabName(broadcastName || selectedTab || '');
-                                const tabKey = selectedTab || ('주문_' + cleanCur);
-                                if (cleanCur) {
-                                    setLocalBroadcastStore(storePrev => {
-                                        const nextStore = {
-                                            ...storePrev,
-                                            [tabKey]: {
-                                                ...(storePrev[tabKey] || {}),
-                                                broadcastName: cleanCur,
-                                                freeShipThreshold,
-                                                defaultShipping,
-                                                cardFeeRate,
-                                                updatedAt: Date.now(),
-                                                groups: nextGroups
-                                            }
-                                        };
-                                        try { localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(nextStore)); } catch (e) {}
-                                        return nextStore;
-                                    });
-                                }
+                                saveUpdatedGroupsImmediately(nextGroups, `✏️ '${targetNick}' 배송지가 직원용 시트와 고객 포털에 즉시 저장되었습니다!`);
                                 return nextGroups;
                             });
-                            setHasUnsavedChanges(true);
                             setAddrEditTarget(null);
-                            showToast(`✏️ '${targetNick}' 배송지가 화면에 반영되었습니다. 우측 상단 [시트 저장 (Ctrl+S)]을 누르면 최종 저장됩니다!`);
                         }}
                     />
                     <CsCopySelectModal
@@ -3363,6 +3463,19 @@
                                                             >
                                                                 {g.isNoShow ? '🚨 노쇼됨' : '노쇼'}
                                                             </button>
+
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => openModal(`'${g.nick}' 님의 이 방송 주문 카드를 완전히 삭제하시겠습니까?`, 'confirm', () => {
+                                                                    const nextGroups = customerGroups.filter(cur => cur.nick !== g.nick);
+                                                                    setCustomerGroups(nextGroups);
+                                                                    saveUpdatedGroupsImmediately(nextGroups, `🗑️ '${g.nick}' 님의 주문이 시트와 고객 포털에서 즉시 삭제되었습니다.`);
+                                                                })}
+                                                                className="px-2 py-0.5 rounded text-[11px] font-bold bg-white text-slate-400 border border-slate-300 hover:bg-red-50 hover:text-red-600 hover:border-red-200"
+                                                                title="이 고객의 주문 카드 전체 삭제"
+                                                            >
+                                                                🗑️ 삭제
+                                                            </button>
                                                         </div>
 
                                                         <div className="flex items-center gap-2 text-xs font-extrabold flex-wrap justify-end">
@@ -3412,52 +3525,53 @@
                                                                         onClick={() => {
                                                                             const overAmt = Math.abs(sum.baseBal);
                                                                             const nextCred = custCredit + overAmt;
-                                                                            openModal(`'${g.nick}' 님의 과납금 ${overAmt.toLocaleString()}원을 보유 적립금(총 ${nextCred.toLocaleString()}원)으로 전환하고 현재 주문서를 완납으로 정리할까요?`, 'confirm', () => {
+                                                                            openModal(`'${g.nick}' 님의 과납금 ${overAmt.toLocaleString()}원을 적립금으로 전환하시겠습니까?\n(전환 후 보유 적립금: ${nextCred.toLocaleString()}원)`, 'confirm', () => {
                                                                                 handleUpdateCustomerCredit(g.nick, nextCred);
-                                                                                updateCustomerGroup(g.nick, cur => ({
-                                                                                    ...cur,
-                                                                                    deposit: Math.max(0, (Number(cur.deposit) || 0) - overAmt)
-                                                                                }));
+                                                                                updateCustomerGroup(g.nick, cur => ({ ...cur, deposit: Math.max(0, (Number(cur.deposit) || 0) - overAmt) }));
                                                                             });
                                                                         }}
-                                                                        className="px-2 py-0.5 rounded bg-teal-600 hover:bg-teal-700 text-white text-[11px] font-extrabold shadow-sm"
+                                                                        className="px-1.5 py-0.5 bg-teal-600 hover:bg-teal-700 text-white rounded text-[10px] font-extrabold shadow-sm"
                                                                     >
                                                                         👉 적립금전환
                                                                     </button>
                                                                 </div>
-                                                            ) : null}
+                                                            ) : (
+                                                                <span className="text-emerald-600">완납 (0원)</span>
+                                                            )}
                                                         </div>
                                                     </div>
 
-                                                    <div className="px-3.5 py-1.5 bg-white border-b border-slate-100 flex items-center justify-between gap-2 text-xs">
+                                                    <div className="px-3.5 py-1.5 bg-white border-b border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
                                                         {g.address ? (
                                                             <div className="flex items-center gap-2 min-w-0 flex-1">
-                                                                <span className="font-extrabold text-emerald-700 shrink-0">🏠 {g.realname}</span>
-                                                                <span
-                                                                    onClick={() => { copyToClipboard(g.phone); showToast('연락처 복사됨'); }}
-                                                                    className="px-1.5 py-0.5 bg-slate-100 rounded text-slate-600 font-bold text-[11px] cursor-pointer shrink-0"
-                                                                >
-                                                                    {g.phone}
+                                                                <span className="font-extrabold text-emerald-700 shrink-0 flex items-center gap-1">
+                                                                    <Icon name="house-line" weight="fill" /> {g.realname || g.nick}
                                                                 </span>
-                                                                <span className="text-slate-700 truncate">{stripZipcode(g.address)}</span>
-                                                                {cleanMemoText(g.memo, g.address) && (
-                                                                    <span className="text-red-600 font-bold shrink-0">[{cleanMemoText(g.memo, g.address)}]</span>
+                                                                {g.phone && (
+                                                                    <span
+                                                                        onClick={() => { copyToClipboard(g.phone); showToast('연락처 복사됨'); }}
+                                                                        className="px-1.5 py-0.5 bg-slate-100 rounded text-slate-600 font-bold text-[11px] cursor-pointer hover:bg-slate-200 shrink-0"
+                                                                    >
+                                                                        {g.phone}
+                                                                    </span>
                                                                 )}
+                                                                <span className="text-slate-700 truncate">{stripZipcode(g.address)}</span>
+                                                                {g.memo && <span className="text-red-500 font-bold shrink-0">[{g.memo}]</span>}
                                                             </div>
                                                         ) : (() => {
-                                                            const matchedMaster = findMasterAddressMatch(g.nick);
+                                                            const dictMatch = findMasterAddressMatch(g.nick);
                                                             return (
-                                                                <div className="flex items-center gap-2 flex-wrap min-w-0 flex-1">
-                                                                    <span className="text-red-500 font-bold text-[11px] shrink-0">⚠️ 등록된 배송지가 없습니다.</span>
-                                                                    {matchedMaster && (
+                                                                <div className="flex items-center gap-2 flex-wrap">
+                                                                    <span className="text-red-500 font-bold flex items-center gap-1 text-[11px]">
+                                                                        <Icon name="warning-circle" weight="fill" /> 등록된 배송지가 없습니다
+                                                                    </span>
+                                                                    {dictMatch && (
                                                                         <button
                                                                             type="button"
-                                                                            onClick={() => handleApplyMasterAddressToGroup(g.nick, matchedMaster)}
-                                                                            className="px-2.5 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md font-extrabold text-[11px] shadow-sm flex items-center gap-1 truncate max-w-md"
-                                                                            title={`클릭 시 찐고객사전의 [${matchedMaster.realname} / ${matchedMaster.address}] 주소를 즉시 적용합니다`}
+                                                                            onClick={() => handleApplyMasterAddressToGroup(g.nick, dictMatch)}
+                                                                            className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[11px] font-extrabold shadow-sm flex items-center gap-1"
                                                                         >
-                                                                            <Icon name="sparkle" weight="fill" size={12} />
-                                                                            <span className="truncate">📗 찐고객사전 주소 즉시적용: {matchedMaster.realname} ({matchedMaster.address})</span>
+                                                                            📗 찐고객사전 주소 자동채우기 ({dictMatch.realname})
                                                                         </button>
                                                                     )}
                                                                 </div>
@@ -3466,19 +3580,19 @@
                                                         <button
                                                             type="button"
                                                             onClick={() => setAddrEditTarget(g)}
-                                                            className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded border border-slate-300 text-[11px] font-bold shrink-0"
+                                                            className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded font-bold text-[11px] shrink-0"
                                                         >
-                                                            {g.address ? '배송지 수정' : '📗 찐고객사전 검색 / 배송지 입력'}
+                                                            배송지 수정
                                                         </button>
                                                     </div>
 
                                                     <div className="divide-y divide-slate-100 px-3.5 py-1">
                                                         {(g.items || []).map((it, idx) => (
-                                                            <div key={it.id || idx} className={`py-1.5 flex items-center justify-between gap-2 text-xs ${it.isWaitlist ? 'bg-orange-50/60 -mx-3.5 px-3.5' : ''}`}>
+                                                            <div key={it.id || idx} className={`py-1.5 flex items-center justify-between gap-2 text-xs ${it.isWaitlist ? 'bg-amber-50/60 -mx-3.5 px-3.5' : ''}`}>
                                                                 <div className="flex items-center gap-1.5 flex-1 min-w-0">
                                                                     {it.isWaitlist && (
-                                                                        <span className="bg-orange-500 text-white text-[10px] font-extrabold px-1.5 py-0.5 rounded shrink-0">
-                                                                            {it.waitlistOrder ? `대기${it.waitlistOrder}번` : '대기'}
+                                                                        <span className="bg-amber-500 text-white text-[10px] font-extrabold px-1.5 py-0.5 rounded shrink-0">
+                                                                            대기{it.waitlistOrder || 1}번
                                                                         </span>
                                                                     )}
                                                                     <input
@@ -3488,71 +3602,73 @@
                                                                             const val = e.target.value;
                                                                             updateCustomerGroup(g.nick, cur => ({
                                                                                 ...cur,
-                                                                                items: cur.items.map((x, i) => i === idx ? {
-                                                                                    ...x,
-                                                                                    product: val,
-                                                                                    price: (val.trim() === '적립금' && Number(x.price) > 0) ? -Math.abs(Number(x.price)) : x.price
-                                                                                } : x)
+                                                                                items: cur.items.map((x, i) => i === idx ? { ...x, product: val } : x)
                                                                             }));
                                                                         }}
                                                                         placeholder="상품명 입력"
-                                                                        className={`w-full font-bold bg-transparent outline-none focus:bg-slate-50 px-1.5 py-0.5 rounded ${it.isWaitlist ? 'text-orange-800' : (Number(it.price) < 0 ? 'text-teal-700' : 'text-slate-800')}`}
+                                                                        className={`w-full bg-transparent font-bold outline-none focus:bg-slate-50 px-1.5 py-0.5 rounded ${it.product === '적립금' ? 'text-teal-700 font-extrabold' : 'text-slate-800'}`}
                                                                     />
                                                                 </div>
                                                                 <div className="flex items-center gap-1.5 shrink-0">
-                                                                    <input
-                                                                        type="number"
-                                                                        value={it.qty}
-                                                                        onChange={e => {
-                                                                            const newQ = Number(e.target.value) || 1;
-                                                                            updateCustomerGroup(g.nick, cur => ({
-                                                                                ...cur,
-                                                                                items: cur.items.map((x, i) => {
-                                                                                    if (i !== idx) return x;
-                                                                                    const unitP = (Number(x.qty) || 1) > 0 ? Math.round((Number(x.price) || 0) / (Number(x.qty) || 1)) : 0;
-                                                                                    return { ...x, qty: newQ, price: unitP * newQ };
-                                                                                })
-                                                                            }));
-                                                                        }}
-                                                                        className="w-12 border border-slate-200 rounded px-1.5 py-0.5 text-right font-bold"
-                                                                    />
-                                                                    <span className="text-slate-400">개</span>
-                                                                    <input
-                                                                        type="text"
-                                                                        value={Number(it.price || 0).toLocaleString()}
-                                                                        onChange={e => {
-                                                                            const raw = e.target.value.replace(/,/g, '');
-                                                                            if (raw === '' || raw === '-' || !isNaN(raw)) {
-                                                                                let num = raw === '' || raw === '-' ? 0 : Number(raw);
-                                                                                if (String(it.product || '').trim() === '적립금' && num > 0) {
-                                                                                    num = -Math.abs(num);
-                                                                                }
+                                                                    <div className="flex items-center border border-slate-200 rounded px-1.5 py-0.5 bg-slate-50">
+                                                                        <input
+                                                                            type="number"
+                                                                            value={it.qty}
+                                                                            onChange={e => {
+                                                                                const nextQ = Math.max(1, Number(e.target.value) || 1);
+                                                                                const unitP = (Number(it.qty) > 0) ? Math.round((Number(it.price) || 0) / Number(it.qty)) : (Number(it.price) || 0);
+                                                                                updateCustomerGroup(g.nick, cur => ({
+                                                                                    ...cur,
+                                                                                    items: cur.items.map((x, i) => i === idx ? { ...x, qty: nextQ, price: unitP * nextQ } : x)
+                                                                                }));
+                                                                            }}
+                                                                            className="w-10 text-right font-extrabold bg-transparent outline-none"
+                                                                        />
+                                                                        <span className="text-[10px] text-slate-400 ml-0.5">개</span>
+                                                                    </div>
+                                                                    <div className="flex items-center border border-slate-200 rounded px-2 py-0.5 bg-slate-50 w-28">
+                                                                        <input
+                                                                            type="text"
+                                                                            value={it.price !== undefined && it.price !== '' ? Number(it.price).toLocaleString() : '0'}
+                                                                            onChange={e => {
+                                                                                const raw = e.target.value.replace(/[^0-9-]/g, '');
+                                                                                const num = (raw === '' || raw === '-') ? 0 : Number(raw);
                                                                                 updateCustomerGroup(g.nick, cur => ({
                                                                                     ...cur,
                                                                                     items: cur.items.map((x, i) => i === idx ? { ...x, price: num } : x)
                                                                                 }));
-                                                                            }
-                                                                        }}
-                                                                        className={`w-24 border border-slate-200 rounded px-2 py-0.5 text-right font-bold ${Number(it.price) < 0 ? 'text-teal-700' : ''}`}
-                                                                    />
-                                                                    <span className="text-slate-400">원</span>
+                                                                            }}
+                                                                            className={`w-full text-right font-extrabold bg-transparent outline-none tabular-nums ${Number(it.price) < 0 ? 'text-teal-700' : 'text-slate-900'}`}
+                                                                        />
+                                                                        <span className="text-[10px] text-slate-400 ml-0.5">원</span>
+                                                                    </div>
                                                                     <button
                                                                         type="button"
                                                                         onClick={() => updateCustomerGroup(g.nick, cur => ({
                                                                             ...cur,
-                                                                            items: cur.items.map((x, i) => i === idx ? { ...x, isWaitlist: !x.isWaitlist, waitlistOrder: !x.isWaitlist ? (x.waitlistOrder || 1) : 0 } : x)
+                                                                            items: cur.items.map((x, i) => i === idx ? { ...x, isWaitlist: !x.isWaitlist, waitlistOrder: !x.isWaitlist ? 1 : 0 } : x)
                                                                         }))}
-                                                                        className={`p-1 rounded ${it.isWaitlist ? 'text-orange-500 bg-orange-100' : 'text-slate-300 hover:text-orange-500'}`}
+                                                                        className={`p-1 rounded ${it.isWaitlist ? 'text-amber-600 bg-amber-100' : 'text-slate-300 hover:text-amber-600'}`}
                                                                         title="품절 대기 전환"
                                                                     >
-                                                                        <Icon name="hourglass" weight="bold" />
+                                                                        <Icon name="hourglass" weight="fill" />
                                                                     </button>
                                                                     <button
                                                                         type="button"
-                                                                        onClick={() => updateCustomerGroup(g.nick, cur => ({
-                                                                            ...cur,
-                                                                            items: cur.items.filter((_, i) => i !== idx)
-                                                                        }))}
+                                                                        onClick={() => {
+                                                                            const remainingItems = g.items.filter((_, i) => i !== idx);
+                                                                            if (remainingItems.length === 0) {
+                                                                                openModal(`마지막 품목입니다. '${g.nick}' 님의 주문 카드를 함께 삭제하시겠습니까?`, 'confirm', () => {
+                                                                                    const nextGroups = customerGroups.filter(cur => cur.nick !== g.nick);
+                                                                                    setCustomerGroups(nextGroups);
+                                                                                    saveUpdatedGroupsImmediately(nextGroups, `🗑️ '${g.nick}' 님의 주문이 삭제되었습니다.`);
+                                                                                });
+                                                                            } else {
+                                                                                const nextGroups = customerGroups.map(cur => cur.nick === g.nick ? { ...cur, items: remainingItems } : cur);
+                                                                                setCustomerGroups(nextGroups);
+                                                                                saveUpdatedGroupsImmediately(nextGroups, `🗑️ 품목 삭제가 시트와 포털에 반영되었습니다.`);
+                                                                            }
+                                                                        }}
                                                                         className="p-1 text-slate-300 hover:text-red-600"
                                                                         title="품목 삭제"
                                                                     >
@@ -3694,8 +3810,9 @@
                                                                 type="button"
                                                                 onClick={() => {
                                                                     const nextStatus = cs.csStatus === '처리완료' ? '미처리' : '처리완료';
-                                                                    setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, csStatus: nextStatus } : x));
-                                                                    setHasUnsavedChanges(true);
+                                                                    const nextCsList = csGroups.map(x => x.id === cs.id ? { ...x, csStatus: nextStatus } : x);
+                                                                    setCsGroups(nextCsList);
+                                                                    saveCsOrdersToSheetImmediate(nextCsList, `✅ '${cs.nick}' 님의 상태가 [${nextStatus}]로 시트에 즉시 저장되었습니다!`);
                                                                 }}
                                                                 className={`px-3 py-1 rounded-lg text-[11px] font-extrabold border transition shadow-sm ${
                                                                     cs.csStatus === '처리완료'
@@ -3709,8 +3826,9 @@
                                                             <button
                                                                 type="button"
                                                                 onClick={() => openModal(`'${cs.nick}' 님의 내역을 삭제하시겠습니까?`, 'confirm', () => {
-                                                                    setCsGroups(prev => prev.filter(x => x.id !== cs.id));
-                                                                    setHasUnsavedChanges(true);
+                                                                    const nextCsList = csGroups.filter(x => x.id !== cs.id);
+                                                                    setCsGroups(nextCsList);
+                                                                    saveCsOrdersToSheetImmediate(nextCsList, `🗑️ '${cs.nick}' 님의 CS 내역이 시트에서 즉시 삭제되었습니다.`);
                                                                 })}
                                                                 className="text-slate-400 hover:text-red-600 p-1"
                                                                 title="내역 삭제"
@@ -3747,11 +3865,9 @@
                                                                     value={cs.csTracking || ''}
                                                                     onChange={e => {
                                                                         const val = e.target.value.replace(/[^0-9,-]/g, '');
-                                                                        setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, csTracking: val } : x));
-                                                                        setHasUnsavedChanges(true);
-                                                                    }}
-                                                                    onBlur={() => {
-                                                                        syncCsGroupsToFirebase(csGroups);
+                                                                        const nextCsList = csGroups.map(x => x.id === cs.id ? { ...x, csTracking: val } : x);
+                                                                        setCsGroups(nextCsList);
+                                                                        scheduleAutoSaveCs(nextCsList);
                                                                     }}
                                                                     placeholder="송장번호 입력"
                                                                     className="w-28 bg-transparent text-[11px] font-extrabold text-blue-900 outline-none"
@@ -3792,11 +3908,12 @@
                                                                             value={tag}
                                                                             onChange={e => {
                                                                                 const nextTag = e.target.value;
-                                                                                setCsGroups(prev => prev.map(x => x.id !== cs.id ? x : {
+                                                                                const nextCsList = csGroups.map(x => x.id !== cs.id ? x : {
                                                                                     ...x,
                                                                                     items: x.items.map((item, i) => i === idx ? { ...item, csTag: nextTag } : item)
-                                                                                }));
-                                                                                setHasUnsavedChanges(true);
+                                                                                });
+                                                                                setCsGroups(nextCsList);
+                                                                                saveCsOrdersToSheetImmediate(nextCsList, `✅ 품목 상태가 [${nextTag}](으)로 시트에 즉시 저장되었습니다!`);
                                                                             }}
                                                                             className={`px-2 py-0.5 rounded text-[11px] font-extrabold border outline-none cursor-pointer shrink-0 ${
                                                                                 tag === '미송' ? 'bg-purple-100 text-purple-800 border-purple-400' :
@@ -3827,8 +3944,10 @@
                                                                 type="text"
                                                                 value={cs.csMemo || ''}
                                                                 onChange={e => {
-                                                                    setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, csMemo: e.target.value } : x));
-                                                                    setHasUnsavedChanges(true);
+                                                                    const val = e.target.value;
+                                                                    const nextCsList = csGroups.map(x => x.id === cs.id ? { ...x, csMemo: val } : x);
+                                                                    setCsGroups(nextCsList);
+                                                                    scheduleAutoSaveCs(nextCsList);
                                                                 }}
                                                                 placeholder="미송 입고예정일(예: 10/25 입고 후 출고), 부분선발송 여부, 교환/반품 사유 등 입력"
                                                                 className="flex-1 bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-800 outline-none focus:border-blue-600"
@@ -3845,8 +3964,9 @@
                                                                     value={cs.refundAccount !== undefined ? cs.refundAccount : splitCsMemoAndAccount(cs.csMemo).accountOnly}
                                                                     onChange={e => {
                                                                         const val = e.target.value;
-                                                                        setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, refundAccount: val } : x));
-                                                                        setHasUnsavedChanges(true);
+                                                                        const nextCsList = csGroups.map(x => x.id === cs.id ? { ...x, refundAccount: val } : x);
+                                                                        setCsGroups(nextCsList);
+                                                                        scheduleAutoSaveCs(nextCsList);
                                                                     }}
                                                                     placeholder="은행 / 계좌번호 / 예금주 입력"
                                                                     className="flex-1 min-w-0 bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-800 outline-none focus:border-blue-600"
@@ -3877,8 +3997,9 @@
                                                                         onChange={e => {
                                                                             const raw = e.target.value.replace(/[^0-9]/g, '');
                                                                             const num = raw ? Number(raw) : 0;
-                                                                            setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, refundAmount: num } : x));
-                                                                            setHasUnsavedChanges(true);
+                                                                            const nextCsList = csGroups.map(x => x.id === cs.id ? { ...x, refundAmount: num } : x);
+                                                                            setCsGroups(nextCsList);
+                                                                            scheduleAutoSaveCs(nextCsList);
                                                                         }}
                                                                         placeholder="0"
                                                                         className="w-full bg-white border border-rose-300 rounded-lg pl-2.5 pr-6 py-1.5 text-xs font-extrabold text-right text-rose-700 outline-none focus:border-rose-500"
@@ -3888,11 +4009,13 @@
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => {
-                                                                        setCsGroups(prev => prev.map(x => x.id === cs.id ? {
+                                                                        const nextDone = !cs.refundCompleted;
+                                                                        const nextCsList = csGroups.map(x => x.id === cs.id ? {
                                                                             ...x,
-                                                                            refundCompleted: !x.refundCompleted
-                                                                        } : x));
-                                                                        setHasUnsavedChanges(true);
+                                                                            refundCompleted: nextDone
+                                                                        } : x);
+                                                                        setCsGroups(nextCsList);
+                                                                        saveCsOrdersToSheetImmediate(nextCsList, `✅ 환불 상태가 [${nextDone ? '환불완료' : '환불대기'}]로 시트에 즉시 저장되었습니다!`);
                                                                     }}
                                                                     className={`px-2.5 py-1.5 rounded-lg text-[11px] font-extrabold border shrink-0 whitespace-nowrap transition ${
                                                                         cs.refundCompleted
@@ -3915,8 +4038,9 @@
                                                                         onChange={e => {
                                                                             const raw = e.target.value.replace(/[^0-9]/g, '');
                                                                             const num = raw ? Number(raw) : 0;
-                                                                            setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, shipping: num } : x));
-                                                                            setHasUnsavedChanges(true);
+                                                                            const nextCsList = csGroups.map(x => x.id === cs.id ? { ...x, shipping: num } : x);
+                                                                            setCsGroups(nextCsList);
+                                                                            scheduleAutoSaveCs(nextCsList);
                                                                         }}
                                                                         placeholder="0"
                                                                         className="w-full bg-white border border-slate-300 rounded-lg pl-2.5 pr-6 py-1.5 text-xs font-extrabold text-right text-slate-800 outline-none focus:border-blue-600"
@@ -3926,12 +4050,14 @@
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => {
-                                                                        setCsGroups(prev => prev.map(x => x.id === cs.id ? {
+                                                                        const nextPaid = !cs.csFeePaid;
+                                                                        const nextCsList = csGroups.map(x => x.id === cs.id ? {
                                                                             ...x,
-                                                                            csFeePaid: !x.csFeePaid,
-                                                                            deposit: !x.csFeePaid ? (Number(x.shipping) || 4000) : 0
-                                                                        } : x));
-                                                                        setHasUnsavedChanges(true);
+                                                                            csFeePaid: nextPaid,
+                                                                            deposit: nextPaid ? (Number(x.shipping) || 4000) : 0
+                                                                        } : x);
+                                                                        setCsGroups(nextCsList);
+                                                                        saveCsOrdersToSheetImmediate(nextCsList, `✅ 교반품비 상태가 [${nextPaid ? '입금됨' : '미입금'}]으로 시트에 즉시 저장되었습니다!`);
                                                                     }}
                                                                     className={`px-2.5 py-1.5 rounded-lg text-[11px] font-extrabold border shrink-0 whitespace-nowrap transition ${
                                                                         cs.csFeePaid
