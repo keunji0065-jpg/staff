@@ -49,10 +49,10 @@
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 292; // 292 => v2.92
+        const VERSION_STEP = 293; // 293 => v2.93
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.22";
-        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbxvccAS0Zy37eBEyY0IDgHBFroNwzabYVDvg3JvaYUQYr9d_hfxdWdKbDssEPg-OJN7/exec';
+        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzrMczblUPLxqGESdkZks8osdL-CihDenW94Ae3ODL8u_QhVAZGKrsVI_KchtHjCTFg/exec';
         const DEFAULT_STAFF_SHEET_ID = '1sM5bkDqEjD6Kpxu2yoJe2aiMuqpcWLMAIGpY3iL5_x8';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
         const DEFAULT_DEP_SHEET_ID = '14bx2HMd_NID3zQN-Hb0x0At2Qmti7-p1Zfx1ZadNScY';
