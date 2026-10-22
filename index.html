@@ -40,7 +40,7 @@
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 282; // 282 => v2.82, 299 => v2.99, 300 => v3.00
+        const VERSION_STEP = 283; // 283 => v2.83, 299 => v2.99, 300 => v3.00
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.22";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbyauz2IJXVC8dyuYy11wMJiB7xrXkh_rRCJ-u4QPHWHFxL4gEZeg-QK2S4-4EURNyIA/exec';
@@ -1400,83 +1400,42 @@
                 try {
                     const discoveredBlocks = {};
 
-                    // 1) '주문' 시트(원본 통합 시트) 및 클라우드(_portal_orders)에 마감되어 올라온 방송들을 동시에 읽어서 한 번에 추출!
-                    const fbOrdersPromise = staffFbDb
-                        ? Promise.race([
-                            staffFbDb.ref('ember_live_data/_portal_orders').once('value').then(s => s.val()).catch(() => null),
-                            new Promise(r => setTimeout(() => r(null), 2500))
-                        ])
-                        : Promise.resolve(null);
-
-                    const [directOrderRows, directFirstRows, gasMainRes, gasOrderRes, fbPortalOrders] = await Promise.all([
+                    // 오직 직원 전용 구글 시트('주문' 탭)에 실제로 들어있는 데이터만 읽어옵니다! (사장님 클라우드 데이터나 옛날 캐시와 절대 섞지 않음)
+                    const [directOrderRows, directFirstRows, gasOrderRes] = await Promise.all([
                         fetchGoogleSheetDirect(activeStaffSheetId, '주문'),
                         fetchGoogleSheetDirect(activeStaffSheetId, null),
-                        fetchGas(`${activeGasUrl}?action=get_orders&masterId=${activeStaffSheetId}&tabName=${encodeURIComponent('메인주문')}&t=${Date.now()}`, null, 12000).catch(() => null),
-                        fetchGas(`${activeGasUrl}?action=get_orders&masterId=${activeStaffSheetId}&tabName=${encodeURIComponent('주문')}&t=${Date.now()}`, null, 12000).catch(() => null),
-                        fbOrdersPromise
+                        fetchGas(`${activeGasUrl}?action=get_orders&masterId=${activeStaffSheetId}&tabName=${encodeURIComponent('주문')}&t=${Date.now()}`, null, 12000).catch(() => null)
                     ]);
 
-                    if (Array.isArray(directFirstRows) && directFirstRows.length > 0) {
-                        Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(directFirstRows, '주문'));
-                    }
                     if (Array.isArray(directOrderRows) && directOrderRows.length > 0) {
                         Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(directOrderRows, '주문'));
-                    }
-                    const gasOrderRows = Array.isArray(gasOrderRes?.data) ? gasOrderRes.data : (Array.isArray(gasOrderRes?.orders) ? gasOrderRes.orders : []);
-                    if (gasOrderRows.length > 0) {
-                        Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(gasOrderRows, '주문'));
-                    }
-                    const gasMainRows = Array.isArray(gasMainRes?.data) ? gasMainRes.data : (Array.isArray(gasMainRes?.orders) ? gasMainRes.orders : []);
-                    if (gasMainRows.length > 0) {
-                        Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(gasMainRows, '주문'));
+                    } else if (Array.isArray(directFirstRows) && directFirstRows.length > 0) {
+                        Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(directFirstRows, '주문'));
                     }
 
-                    // 사장님이 방금 [방송 마감]을 눌러 클라우드(_portal_orders)로 넘긴 방송이 있으면 누락 없이 즉시 병합!
-                    if (fbPortalOrders && typeof fbPortalOrders === 'object') {
-                        Object.entries(fbPortalOrders).forEach(([bKey, bVal]) => {
-                            if (bKey === '__MAIN_LIVE__' || !bVal || !Array.isArray(bVal.customers) || bVal.customers.length === 0) return;
-                            const cleanB = cleanDisplayTabName(bVal.broadcastName || bKey);
-                            if (!cleanB || ['오늘의방송', '기본방송', '주문', '메인주문'].includes(cleanB)) return;
-                            const tabKey = '주문_' + cleanB;
-                            if (!discoveredBlocks[tabKey]) {
-                                discoveredBlocks[tabKey] = {
-                                    broadcastName: cleanB,
-                                    freeShipThreshold: Number(bVal.customers[0]?.freeShippingThreshold) || 70000,
-                                    defaultShipping: 4000,
-                                    cardFeeRate: Number(bVal.customers[0]?.cardFeeRate) || 10,
-                                    updatedAt: bVal.updatedAt || Date.now(),
-                                    groups: bVal.customers.map(c => ({
-                                        nick: c.nickname,
-                                        realname: c.address?.realname || '',
-                                        phone: fixPhoneNumber(c.address?.phone || ''),
-                                        address: stripZipcode(c.address?.baseAddress || ''),
-                                        memo: c.address?.memo || '',
-                                        shipping: Number(c.shipping) || 0,
-                                        deposit: Number(c.depositTotal) || 0,
-                                        cardMode: String(c.isCard || '').includes('완료') ? 'completed' : (c.isCard ? 'requested' : 'none'),
-                                        isVip: Boolean(c.isVip),
-                                        isNoShow: Boolean(c.isNoShow),
-                                        isConfirmed: Boolean(c.isConfirmed),
-                                        pin: normalizePin4(c.phoneLast4),
-                                        trackingNumber: (Array.isArray(c.trackingNumbers) && c.trackingNumbers[0]) || '',
-                                        deposits: Array.isArray(c.deposits) ? c.deposits : [],
-                                        showDeposits: false,
-                                        items: (c.items || []).map((it, idx) => ({
-                                            id: `item_${Date.now()}_${idx}_${Math.random()}`,
-                                            product: it.product || '',
-                                            qty: Number(it.qty) || 1,
-                                            price: Number(it.price) || 0,
-                                            isWaitlist: Boolean(it.isWaitlist),
-                                            waitlistOrder: Number(it.waitlistOrder) || 0
-                                        }))
-                                    }))
-                                };
+                    if (Object.keys(discoveredBlocks).length === 0) {
+                        const gasOrderRows = Array.isArray(gasOrderRes?.data) ? gasOrderRes.data : (Array.isArray(gasOrderRes?.orders) ? gasOrderRes.orders : []);
+                        if (gasOrderRows.length > 0) {
+                            Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(gasOrderRows, '주문'));
+                        }
+                    }
+
+                    // 시트에서 정상적으로 읽어왔다면 옛날 로컬 캐시(중복 방송들)를 버리고 시트 원본으로 100% 덮어씁니다!
+                    const hasSheetData = Object.keys(discoveredBlocks).length > 0;
+                    const finalBlocksMap = hasSheetData ? discoveredBlocks : localBroadcastStore;
+                    setLocalBroadcastStore(finalBlocksMap);
+                    try {
+                        localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(finalBlocksMap));
+                    } catch (e) {}
+
+                    // 혹시 클라우드(_portal_orders)에 옛날 중복 이름으로 남아있던 방이 있으면 직원 시트 기준으로 정리
+                    if (hasSheetData && staffFbDb) {
+                        Object.values(discoveredBlocks).forEach(blk => {
+                            if (blk && blk.broadcastName && Array.isArray(blk.groups)) {
+                                syncBroadcastGroupsToFirebase(blk.broadcastName, blk.groups, blk.freeShipThreshold, blk.cardFeeRate, customerCredits, 'staff');
                             }
                         });
                     }
-
-                    const finalBlocksMap = { ...localBroadcastStore, ...discoveredBlocks };
-                    setLocalBroadcastStore(finalBlocksMap);
 
                     const allTabKeys = Object.keys(finalBlocksMap).filter(k =>
                         k.startsWith('주문_') && !['주문_기본방송', '주문_주문', '주문_주문통합', '주문_메인주문'].includes(k)
@@ -1502,14 +1461,19 @@
                             setCardFeeRate(targetData.cardFeeRate || 10);
                             setCustomerGroups(targetData.groups);
                         }
+                    } else {
+                        setSelectedTab('');
+                        setBroadcastName('');
+                        setCustomerGroups([]);
                     }
+                    setHasUnsavedChanges(false);
                     loadCsOrders();
                     loadMasterAddresses();
                 } catch (e) {
                 } finally {
                     setIsLoading(false);
                 }
-            }, [activeGasUrl, activeStaffSheetId, selectedTab, loadCsOrders, loadMasterAddresses]);
+            }, [activeGasUrl, activeStaffSheetId, selectedTab, customerCredits, loadCsOrders, loadMasterAddresses]);
 
             const hasInitializedRef = useRef(false);
             useEffect(() => {
