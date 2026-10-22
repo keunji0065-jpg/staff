@@ -40,10 +40,10 @@
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 285; // 285 => v2.85, 299 => v2.99, 300 => v3.00
+        const VERSION_STEP = 289; // 289 => v2.89
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.22";
-        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzBczJEJh3m4A_cMChAO2dcyLo2cuRA8pFcDDI-mZJc711bC0rIapnZwHokmmm2A0Ej/exec';
+        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbxvccAS0Zy37eBEyY0IDgHBFroNwzabYVDvg3JvaYUQYr9d_hfxdWdKbDssEPg-OJN7/exec';
         const DEFAULT_STAFF_SHEET_ID = '1sM5bkDqEjD6Kpxu2yoJe2aiMuqpcWLMAIGpY3iL5_x8';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
         const DEFAULT_DEP_SHEET_ID = '14bx2HMd_NID3zQN-Hb0x0At2Qmti7-p1Zfx1ZadNScY';
@@ -195,7 +195,7 @@
                 if (nick.startsWith('___WORKSPACE')) {
                     if (prod) {
                         curBName = cleanDisplayTabName(prod);
-                    } else if (defaultTabName && !['주문', '주문통합', '시트1', 'Sheet1'].includes(cleanDisplayTabName(defaultTabName))) {
+                    } else if (defaultTabName && !['메인주문', '주문', '주문통합', '시트1', 'Sheet1'].includes(cleanDisplayTabName(defaultTabName))) {
                         curBName = cleanDisplayTabName(defaultTabName);
                     }
                     curMeta = {
@@ -1160,31 +1160,19 @@
 
                 setIsLoading(true);
                 try {
-                    // '주문' 통합 시트(또는 첫 번째 시트 gid=0)를 통째로 읽어서 모든 방송 블록을 한 번에 갱신!
-                    const unifiedSheetNames = ['주문', '주문_주문', null, canonicalTab, cleanBase];
+                    // 오직 '메인주문' 단일 통합 시트만 읽어서 모든 방송 블록을 한 번에 갱신!
                     let parsedBlocks = {};
-
-                    for (const sName of unifiedSheetNames) {
-                        const directRows = await fetchGoogleSheetDirect(activeStaffSheetId, sName);
-                        if (Array.isArray(directRows) && directRows.length > 0) {
-                            const blocks = parseRowsIntoBroadcastBlocks(directRows, sName || '주문');
-                            if (Object.keys(blocks).length > 0) {
-                                Object.assign(parsedBlocks, blocks);
-                                if (parsedBlocks[canonicalTab]) break;
-                            }
-                        }
+                    const directRows = await fetchGoogleSheetDirect(activeStaffSheetId, '메인주문');
+                    if (Array.isArray(directRows) && directRows.length > 0) {
+                        parsedBlocks = parseRowsIntoBroadcastBlocks(directRows, '메인주문');
                     }
 
-                    // GAS 폴백: 시트가 아직 '비공개'여서 직통 리더가 못 읽었을 경우 GAS(get_orders)로 '주문' 시트 읽기!
+                    // GAS 폴백: 직통 리더 실패 시 GAS(get_orders)로 '메인주문' 시트 읽기!
                     if (Object.keys(parsedBlocks).length === 0) {
-                        for (const tryTab of ['주문', '주문_주문', canonicalTab, cleanBase]) {
-                            const res = await fetchGas(`${activeGasUrl}?action=get_orders&masterId=${activeStaffSheetId}&tabName=${encodeURIComponent(tryTab)}&t=${Date.now()}`, null, 12000);
-                            const fetched = Array.isArray(res?.data) ? res.data : (Array.isArray(res?.orders) ? res.orders : []);
-                            if (fetched.length > 0) {
-                                const blocks = parseRowsIntoBroadcastBlocks(fetched, tryTab);
-                                Object.assign(parsedBlocks, blocks);
-                                if (parsedBlocks[canonicalTab]) break;
-                            }
+                        const res = await fetchGas(`${activeGasUrl}?action=get_orders&masterId=${activeStaffSheetId}&tabName=${encodeURIComponent('메인주문')}&t=${Date.now()}`, null, 12000);
+                        const fetched = Array.isArray(res?.data) ? res.data : (Array.isArray(res?.orders) ? res.orders : []);
+                        if (fetched.length > 0) {
+                            parsedBlocks = parseRowsIntoBroadcastBlocks(fetched, '메인주문');
                         }
                     }
 
@@ -1400,23 +1388,18 @@
                 try {
                     const discoveredBlocks = {};
 
-                    // 오직 직원 전용 구글 시트('주문' 탭)에 실제로 들어있는 데이터만 읽어옵니다! (사장님 클라우드 데이터나 옛날 캐시와 절대 섞지 않음)
-                    const [directOrderRows, directFirstRows, gasOrderRes] = await Promise.all([
-                        fetchGoogleSheetDirect(activeStaffSheetId, '주문'),
-                        fetchGoogleSheetDirect(activeStaffSheetId, null),
-                        fetchGas(`${activeGasUrl}?action=get_orders&masterId=${activeStaffSheetId}&tabName=${encodeURIComponent('주문')}&t=${Date.now()}`, null, 12000).catch(() => null)
+                    // 오직 직원 전용 구글 시트의 '메인주문' 탭 1개만 읽어옵니다!
+                    const [directMainRows, gasMainRes] = await Promise.all([
+                        fetchGoogleSheetDirect(activeStaffSheetId, '메인주문'),
+                        fetchGas(`${activeGasUrl}?action=get_orders&masterId=${activeStaffSheetId}&tabName=${encodeURIComponent('메인주문')}&t=${Date.now()}`, null, 12000).catch(() => null)
                     ]);
 
-                    if (Array.isArray(directOrderRows) && directOrderRows.length > 0) {
-                        Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(directOrderRows, '주문'));
-                    } else if (Array.isArray(directFirstRows) && directFirstRows.length > 0) {
-                        Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(directFirstRows, '주문'));
-                    }
-
-                    if (Object.keys(discoveredBlocks).length === 0) {
-                        const gasOrderRows = Array.isArray(gasOrderRes?.data) ? gasOrderRes.data : (Array.isArray(gasOrderRes?.orders) ? gasOrderRes.orders : []);
+                    if (Array.isArray(directMainRows) && directMainRows.length > 0) {
+                        Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(directMainRows, '메인주문'));
+                    } else {
+                        const gasOrderRows = Array.isArray(gasMainRes?.data) ? gasMainRes.data : (Array.isArray(gasMainRes?.orders) ? gasMainRes.orders : []);
                         if (gasOrderRows.length > 0) {
-                            Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(gasOrderRows, '주문'));
+                            Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(gasOrderRows, '메인주문'));
                         }
                     }
 
@@ -1926,7 +1909,6 @@
                             return rows;
                         };
 
-                        // 모든 방송 블록을 하나의 통합 리스트(allCombinedRows)로 합쳐서 시트를 늘리지 않고 단일 시트에만 저장!
                         const updatedStore = {
                             ...localBroadcastStore,
                             [canonicalTab]: {
@@ -1953,20 +1935,41 @@
                                 }
                             });
 
-                        // ✨ 핵심: '주문_10/20 악세사리', '주문_주문' 같은 불필요한 새 시트가 생기지 않도록 targetSheetName을 '주문'으로 고정하여 단일 통합 시트('주문')만 업데이트하고, 기존에 잘못 생겼던 중복 시트들은 자동으로 삭제 정리합니다!
+                        // ✨ 직원용 시트도 오직 '메인주문' 탭 1개에만 저장하고, 불필요한 '주문' 탭은 자동 정리합니다!
+                        const trackingPayloadList = [];
+                        Object.values(updatedStore).forEach(blk => {
+                            if (blk && Array.isArray(blk.groups)) {
+                                blk.groups.forEach(g => {
+                                    if (g.nick && g.trackingNumber !== undefined) {
+                                        trackingPayloadList.push({
+                                            nickname: g.nick,
+                                            realname: g.realname || '',
+                                            phone: fixPhoneNumber(g.phone || ''),
+                                            trackingNumber: g.trackingNumber || '__CLEAR__'
+                                        });
+                                    }
+                                });
+                            }
+                        });
+
                         const [res] = await Promise.all([
                             fetchGas(activeGasUrl, {
                                 action: 'save_orders',
                                 masterId: activeStaffSheetId,
-                                targetSheetName: '주문',
+                                targetSheetName: '메인주문',
                                 onlyMainOrder: true,
                                 broadcastName: '오늘의방송',
                                 data: allCombinedRows
                             }),
+                            trackingPayloadList.length > 0 ? fetchGas(activeGasUrl, {
+                                action: 'save_tracking_numbers',
+                                masterId: activeStaffSheetId,
+                                data: trackingPayloadList
+                            }).catch(() => null) : Promise.resolve(null),
                             fetchGas(activeGasUrl, {
                                 action: 'delete_old_order_tabs',
                                 masterId: activeStaffSheetId,
-                                tabNames: ['주문_주문', '주문_10/20 악세사리', '주문_10/18 여성복', '주문_10/16 여성복', '주문_10/20 모이사', '주문_10/18 혜자집', '메인주문']
+                                tabNames: ['주문', '주문_주문', '주문_10/20 악세사리', '주문_10/18 여성복', '주문_10/16 여성복', '주문_10/20 모이사', '주문_10/18 혜자집']
                             }).catch(() => null)
                         ]);
 
@@ -2232,6 +2235,125 @@
                 showToast(`🔄 '${group.nick}' 님의 주문서가 [미송/교환/반품 관리] 탭으로 복사되었습니다. [시트 저장 (Ctrl+S)]을 눌러 저장하세요!`);
             };
 
+            // ✨ 송장번호 변경 사항을 시트(주문 탭)와 고객 포털(Firebase)에 즉시 자동 저장하는 헬퍼 함수
+            const saveUpdatedGroupsImmediately = useCallback(async (nextGroups, toastMessage) => {
+                const cleanBName = cleanDisplayTabName(broadcastName || selectedTab);
+                const canonicalTab = '주문_' + cleanBName;
+
+                const updatedStore = {
+                    ...localBroadcastStore,
+                    [canonicalTab]: {
+                        broadcastName: cleanBName,
+                        freeShipThreshold,
+                        defaultShipping,
+                        cardFeeRate,
+                        updatedAt: Date.now(),
+                        groups: nextGroups
+                    }
+                };
+                setLocalBroadcastStore(updatedStore);
+                try { localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(updatedStore)); } catch (e) {}
+
+                // 1) 고객 포털(Firebase)에 0.1초 만에 즉시 반영!
+                if (staffFbDb && cleanBName) {
+                    syncBroadcastGroupsToFirebase(cleanBName, nextGroups, freeShipThreshold, cardFeeRate, customerCredits, 'staff');
+                }
+
+                // 2) 직원용 구글 시트('주문' 탭)에도 즉시 백그라운드 저장!
+                const buildRows = (bTitle, fThresh, dShip, cRate, groupsArr) => {
+                    const rows = [{
+                        '닉네임': '___WORKSPACE_META___',
+                        '상품명': bTitle,
+                        '수량': Number(fThresh) || 70000,
+                        '단가(제품금액)': Number(dShip) || 4000,
+                        '배송비': Number(cRate) || 10,
+                        '입금액': 0,
+                        '카드결제': '', '수령인명': '', '연락처': '', '주소': '', '요청사항': '',
+                        'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
+                    }];
+                    (groupsArr || []).forEach(g => {
+                        const sum = getGroupSummary(g);
+                        const cardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
+                        const cleanPh = fixPhoneNumber(g.phone);
+                        const pinStr = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
+                        const depJson = Array.isArray(g.deposits) && g.deposits.length > 0 ? JSON.stringify(g.deposits) : '';
+                        const itemsList = (g.items && g.items.length > 0) ? g.items : [{ product: '', qty: 1, price: 0, isWaitlist: false, waitlistOrder: 0 }];
+
+                        itemsList.forEach((it, idx) => {
+                            const waitCell = it.isWaitlist ? `대기${it.waitlistOrder || 1}번` : '';
+                            rows.push({
+                                '닉네임': g.nick,
+                                '상품명': it.product || '',
+                                '수량': Number(it.qty) || 1,
+                                '단가(제품금액)': Number(it.price) || 0,
+                                '배송비': sum.ship,
+                                '입금액': idx === 0 ? sum.dep : 0,
+                                '카드결제': cardStr,
+                                '수령인명': g.realname || '',
+                                '연락처': cleanPh ? "'" + cleanPh : '',
+                                '주소': stripZipcode(g.address || ''),
+                                '요청사항': cleanMemoText(g.memo, g.address),
+                                'VIP여부': g.isVip ? 'O' : '',
+                                '노쇼여부': g.isNoShow ? 'O' : '',
+                                '대기여부': waitCell,
+                                '비밀번호': pinStr ? "'" + pinStr : '',
+                                '주문확인': g.isConfirmed ? 'O' : '',
+                                '입금내역JSON': idx === 0 ? depJson : '',
+                                '송장번호': g.trackingNumber ? "'" + String(g.trackingNumber).replace(/^'+/, '') : ''
+                            });
+                        });
+                    });
+                    return rows;
+                };
+
+                const allCombinedRows = [];
+                Object.keys(updatedStore)
+                    .filter(k => k.startsWith('주문_') && !['주문_기본방송', '주문_주문', '주문_주문통합', '주문_메인주문'].includes(k))
+                    .sort((a, b) => extractBroadcastDateScore(b) - extractBroadcastDateScore(a))
+                    .forEach(tKey => {
+                        const blk = updatedStore[tKey];
+                        if (blk && Array.isArray(blk.groups) && blk.groups.length > 0) {
+                            const bTitle = cleanDisplayTabName(blk.broadcastName || tKey);
+                            allCombinedRows.push(...buildRows(bTitle, blk.freeShipThreshold, blk.defaultShipping, blk.cardFeeRate, blk.groups));
+                        }
+                    });
+
+                try {
+                    setIsSaving(true);
+                    const changedTrackingList = nextGroups
+                        .filter(g => g.nick && g.trackingNumber !== undefined)
+                        .map(g => ({
+                            nickname: g.nick,
+                            realname: g.realname || '',
+                            phone: fixPhoneNumber(g.phone || ''),
+                            trackingNumber: g.trackingNumber || '__CLEAR__'
+                        }));
+
+                    await Promise.all([
+                        fetchGas(activeGasUrl, {
+                            action: 'save_tracking_numbers',
+                            masterId: activeStaffSheetId,
+                            broadcastName: cleanBName,
+                            data: changedTrackingList
+                        }),
+                        fetchGas(activeGasUrl, {
+                            action: 'save_orders',
+                            masterId: activeStaffSheetId,
+                            targetSheetName: '메인주문',
+                            onlyMainOrder: true,
+                            broadcastName: '오늘의방송',
+                            data: allCombinedRows
+                        })
+                    ]);
+                    setHasUnsavedChanges(false);
+                    if (toastMessage) showToast(toastMessage);
+                } catch (e) {
+                    setHasUnsavedChanges(true);
+                } finally {
+                    setIsSaving(false);
+                }
+            }, [broadcastName, selectedTab, localBroadcastStore, freeShipThreshold, defaultShipping, cardFeeRate, customerCredits, getGroupSummary, activeGasUrl, activeStaffSheetId, showToast]);
+
             const handleTrackingExcelUpload = (e) => {
                 const file = e.target.files[0];
                 if (!file) return;
@@ -2240,58 +2362,149 @@
                     try {
                         const data = new Uint8Array(evt.target.result);
                         const wb = XLSX.read(data, { type: 'array' });
-                        const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+                        const sheet = wb.Sheets[wb.SheetNames[0]];
+                        // 1행이 제목줄이 아닌 롯데택배 양식도 모두 읽을 수 있도록 2차원 배열로 먼저 스캔
+                        const rawAoA = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
 
-                        const parsedList = [];
+                        let headerRowIdx = 0;
+                        for (let r = 0; r < Math.min(rawAoA.length, 10); r++) {
+                            const rowStr = (rawAoA[r] || []).map(c => String(c || '').replace(/\s+/g, '')).join('|');
+                            if ((rowStr.includes('송장') || rowStr.includes('화물번호') || rowStr.includes('등기')) &&
+                                (rowStr.includes('성명') || rowStr.includes('이름') || rowStr.includes('받는') || rowStr.includes('수하인') || rowStr.includes('수령인') || rowStr.includes('닉네임') || rowStr.includes('고객'))) {
+                                headerRowIdx = r;
+                                break;
+                            }
+                        }
+
+                        const headers = (rawAoA[headerRowIdx] || []).map((h, idx) => String(h || '').trim() || `col_${idx}`);
+                        const rows = rawAoA.slice(headerRowIdx + 1).map(rowArr => {
+                            const obj = {};
+                            headers.forEach((h, idx) => { obj[h] = rowArr[idx] !== undefined ? rowArr[idx] : ''; });
+                            return obj;
+                        });
+
+                        const cleanPersonName = (str) => {
+                            return String(str || '')
+                                .replace(/^\[.*?\]\s*/, '')
+                                .replace(/\(.*?\)/g, '')
+                                .replace(/님$/g, '')
+                                .replace(/[★☆♡♥]/g, '')
+                                .trim();
+                        };
+
+                        const matchedByNick = {};
                         const duplicateWarnings = [];
+                        const unmatchedRows = [];
 
                         rows.forEach(r => {
                             let nick = '', realname = '', phone = '', trk = '';
                             Object.keys(r).forEach(k => {
                                 const ck = k.replace(/\s+/g, '');
-                                const val = String(r[k] || '').trim();
+                                const val = String(r[k] ?? '').trim();
                                 if (!val) return;
-                                if (ck.includes('닉네임') || ck.includes('주문자')) nick = val.replace(/^\[.*?\]\s*/, '').trim();
-                                else if (ck.includes('수하인') || ck.includes('수령인') || ck.includes('받는') || ck === '이름' || ck === '성명' || ck === '고객명') realname = val.replace(/^\[.*?\]\s*/, '').trim();
-                                else if (ck.includes('전화') || ck.includes('연락처') || ck.includes('핸드폰') || ck.includes('휴대폰')) phone = fixPhoneNumber(val);
-                                else if (ck.includes('운송장') || ck.includes('송장') || ck.includes('등기')) trk = val.replace(/[^0-9,-]/g, '');
+                                if (ck.includes('닉네임') || ck.includes('주문자') || ck.includes('주문자명')) {
+                                    nick = cleanPersonName(val);
+                                } else if (ck.includes('수하인') || ck.includes('수령인') || ck.includes('받는분') || ck.includes('받는사람') || ck.includes('성명') || ck === '이름' || ck === '고객명' || ck.includes('수취인')) {
+                                    if (!ck.includes('전화') && !ck.includes('연락처') && !ck.includes('핸드폰') && !ck.includes('휴대폰') && !ck.includes('주소')) {
+                                        realname = cleanPersonName(val);
+                                    }
+                                } else if (ck.includes('전화') || ck.includes('연락처') || ck.includes('핸드폰') || ck.includes('휴대폰') || ck.includes('모바일')) {
+                                    const digits = val.replace(/[^0-9]/g, '');
+                                    if (digits.length >= 4 && digits.length > phone.length) phone = digits;
+                                } else if (ck.includes('운송장') || ck.includes('송장') || ck.includes('등기') || ck.includes('화물번호')) {
+                                    const cleanTrk = val.replace(/[^0-9-]/g, '').replace(/^-+|-+$/g, '');
+                                    if (cleanTrk.replace(/[^0-9]/g, '').length >= 10) trk = cleanTrk;
+                                }
                             });
 
-                            if (trk && (nick || realname || phone)) {
-                                const matches = customerGroups.filter(g => {
-                                    if (nick && normalizeString(g.nick) === normalizeString(nick)) return true;
-                                    if (phone && g.phone && g.phone === phone) return true;
-                                    if (realname && normalizeString(g.realname) === normalizeString(realname)) return true;
-                                    return false;
-                                });
+                            if (!trk || (!nick && !realname && !phone)) return;
 
-                                if (matches.length > 1) {
-                                    duplicateWarnings.push(`• 수하인 '${realname || nick}' (${trk}) ➔ 동명이인: [${matches.map(m => m.nick).join(', ')}]`);
-                                } else if (matches.length === 1) {
-                                    parsedList.push({ nickname: matches[0].nick, realname: realname || nick, phone, trackingNumber: trk });
+                            const inPhoneFull = fixPhoneNumber(phone);
+                            const inPhoneLast4 = phone.length >= 4 ? phone.slice(-4) : '';
+                            const inNickNorm = normalizeString(nick);
+                            const inNickHandle = normalizeHandleNick(nick);
+                            const inRealNorm = normalizeString(realname);
+                            const inRealHandle = normalizeHandleNick(realname);
+
+                            let candidates = [];
+
+                            // 1순위: 휴대폰 전체 번호 일치 (가장 정확)
+                            if (inPhoneFull.length >= 10) {
+                                candidates = customerGroups.filter(g => fixPhoneNumber(g.phone) === inPhoneFull);
+                            }
+                            // 2순위: 닉네임(핸들 제거 포함) 정확히 일치
+                            if (candidates.length !== 1 && inNickNorm) {
+                                const byNick = customerGroups.filter(g =>
+                                    normalizeString(g.nick) === inNickNorm ||
+                                    (inNickHandle && normalizeHandleNick(g.nick) === inNickHandle)
+                                );
+                                if (byNick.length > 0) candidates = byNick;
+                            }
+                            // 3순위: 수령인 성함 + 전화번호 뒷 4자리 동시 일치 (동명이인 완벽 구분)
+                            if (candidates.length !== 1 && inRealNorm && inPhoneLast4) {
+                                const byNameAndLast4 = customerGroups.filter(g => {
+                                    const gReal = normalizeString(cleanPersonName(g.realname));
+                                    const gNick = normalizeHandleNick(g.nick);
+                                    const gLast4 = g.phone && g.phone.length >= 4 ? g.phone.slice(-4) : normalizePin4(g.pin);
+                                    return (gReal === inRealNorm || gNick === inRealNorm) && gLast4 === inPhoneLast4;
+                                });
+                                if (byNameAndLast4.length > 0) candidates = byNameAndLast4;
+                            }
+                            // 4순위: 수령인 성함(또는 닉네임)이 일치하는 경우
+                            if (candidates.length === 0 && (inRealNorm || inNickNorm)) {
+                                const targetNorm = inRealNorm || inNickNorm;
+                                candidates = customerGroups.filter(g => {
+                                    const gReal = normalizeString(cleanPersonName(g.realname));
+                                    const gNick = normalizeString(g.nick);
+                                    const gNickH = normalizeHandleNick(g.nick);
+                                    return gReal === targetNorm || gNick === targetNorm || (gNickH && gNickH === (inRealHandle || inNickHandle));
+                                });
+                            }
+
+                            if (candidates.length === 1) {
+                                const targetNick = candidates[0].nick;
+                                if (matchedByNick[targetNick] && !matchedByNick[targetNick].includes(trk)) {
+                                    matchedByNick[targetNick] = `${matchedByNick[targetNick]}, ${trk}`;
                                 } else {
-                                    parsedList.push({ nickname: nick, realname: realname || nick, phone, trackingNumber: trk });
+                                    matchedByNick[targetNick] = trk;
                                 }
+                            } else if (candidates.length > 1) {
+                                duplicateWarnings.push(`• 수령인 '${realname || nick}' (${trk}) ➔ 동명이인: [${candidates.map(m => m.nick).join(', ')}]`);
+                            } else {
+                                unmatchedRows.push(`• ${realname || nick}${phone ? ` (${phone})` : ''} : ${trk}`);
                             }
                         });
 
-                        if (parsedList.length > 0) {
-                            setCustomerGroups(prev => prev.map(g => {
-                                const found = parsedList.find(p => p.nickname && normalizeString(p.nickname) === normalizeString(g.nick));
-                                return found ? { ...g, trackingNumber: found.trackingNumber } : g;
-                            }));
-                            setHasUnsavedChanges(true);
+                        const matchedCount = Object.keys(matchedByNick).length;
+                        if (matchedCount > 0) {
+                            const nextGroups = customerGroups.map(g => {
+                                if (matchedByNick[g.nick]) {
+                                    return { ...g, trackingNumber: matchedByNick[g.nick] };
+                                }
+                                return g;
+                            });
+                            setCustomerGroups(nextGroups);
 
-                            let msg = `총 ${parsedList.length}건의 롯데택배 송장번호가 화면에 매칭되었습니다!\n\n👉 확인 후 우측 상단 [시트 저장 (Ctrl+S)] 버튼을 눌러야 시트에 최종 저장됩니다.`;
+                            // ✨ 엑셀 업로드 즉시 시트와 고객 포털에 자동 저장!
+                            await saveUpdatedGroupsImmediately(nextGroups, `✅ 총 ${matchedCount}명의 송장번호가 시트 및 고객 포털에 즉시 저장되었습니다!`);
+
+                            let msg = `✅ [${cleanDisplayTabName(broadcastName || selectedTab)}] 방송에 총 ${matchedCount}명의 롯데택배 송장번호가 매칭되어 시트와 고객 포털에 즉시 자동 저장되었습니다!`;
                             if (duplicateWarnings.length > 0) {
-                                msg += `\n\n⚠️ [동명이인 보류 ${duplicateWarnings.length}건]\n` + duplicateWarnings.join('\n');
+                                msg += `\n\n⚠️ [동명이인 보류 ${duplicateWarnings.length}건 - 개별 송장입력으로 넣어주세요]\n` + duplicateWarnings.slice(0, 10).join('\n');
+                            }
+                            if (unmatchedRows.length > 0) {
+                                msg += `\n\n❓ [현재 방송 명단에 없는 수령인 ${unmatchedRows.length}건]\n(다른 날짜 방송인지 좌측 방송 탭을 확인해 주세요)\n` + unmatchedRows.slice(0, 8).join('\n') + (unmatchedRows.length > 8 ? `\n...외 ${unmatchedRows.length - 8}건` : '');
                             }
                             openModal(msg);
                         } else {
-                            openModal('엑셀에서 유효한 [수령인명/닉네임 + 운송장번호] 열을 찾지 못했습니다.');
+                            let failMsg = `[${cleanDisplayTabName(broadcastName || selectedTab)}] 방송 주문서에서 일치하는 고객(수령인명/닉네임/연락처)을 찾지 못했습니다.\n\n1) 좌측에서 송장을 넣을 올바른 방송 날짜가 선택되어 있는지 확인해 주세요.\n2) 엑셀 파일에 [받는분/수령인/닉네임] 열과 [운송장번호/송장번호] 열이 있는지 확인해 주세요.`;
+                            if (unmatchedRows.length > 0) {
+                                failMsg += `\n\n[엑셀에서 읽힌 수령인 예시]\n` + unmatchedRows.slice(0, 5).join('\n');
+                            }
+                            openModal(failMsg);
                         }
                     } catch (err) {
-                        openModal('엑셀 파일 처리 중 오류가 발생했습니다.');
+                        openModal('송장 엑셀 파일 처리 중 오류가 발생했습니다.');
                     }
                 };
                 reader.readAsArrayBuffer(file);
@@ -2712,38 +2925,26 @@
                                             🔄 전 방송 누적 미송 / 교환 / 반품 통합 관리
                                         </span>
                                     ) : (
-                                        <>
+                                        <div className="flex bg-slate-100 p-1 rounded-lg border border-slate-200 gap-1">
                                             <button
-                                                type="button"
-                                                onClick={() => handleRenameBroadcast(selectedTab)}
-                                                className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-black px-2.5 py-1 rounded-lg shadow-sm flex items-center gap-1.5 transition"
-                                                title="클릭하여 현재 방송 이름을 변경합니다"
+                                                onClick={() => { setActiveMainTab('orders'); setGlobalSearchResults(null); }}
+                                                className={`px-3 py-1 rounded-md text-xs font-extrabold transition ${activeMainTab === 'orders' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
                                             >
-                                                <span>📅 {selectedTab ? cleanDisplayTabName(selectedTab) : '방송 선택'}</span>
-                                                <Icon name="pencil-simple" weight="bold" size={12} className="text-blue-200" />
-                                                <span className="text-[10px] font-extrabold bg-blue-700/90 text-blue-100 px-1.5 py-0.5 rounded">이름변경</span>
+                                                📋 주문 조회 ({customerGroups.length}명)
                                             </button>
-                                            <div className="flex bg-slate-100 p-1 rounded-lg border border-slate-200 gap-1">
-                                                <button
-                                                    onClick={() => { setActiveMainTab('orders'); setGlobalSearchResults(null); }}
-                                                    className={`px-3 py-1 rounded-md text-xs font-extrabold transition ${activeMainTab === 'orders' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
-                                                >
-                                                    📋 주문 조회 ({customerGroups.length}명)
-                                                </button>
-                                                <button
-                                                    onClick={() => { setActiveMainTab('tracking'); setGlobalSearchResults(null); }}
-                                                    className={`px-3 py-1 rounded-md text-xs font-extrabold transition ${activeMainTab === 'tracking' ? 'bg-white text-red-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
-                                                >
-                                                    🚚 운송장 엑셀 등록
-                                                </button>
-                                                <button
-                                                    onClick={() => { setActiveMainTab('export'); setGlobalSearchResults(null); }}
-                                                    className={`px-3 py-1 rounded-md text-xs font-extrabold transition ${activeMainTab === 'export' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
-                                                >
-                                                    📊 발주용 / 배송용 엑셀
-                                                </button>
-                                            </div>
-                                        </>
+                                            <button
+                                                onClick={() => { setActiveMainTab('tracking'); setGlobalSearchResults(null); }}
+                                                className={`px-3 py-1 rounded-md text-xs font-extrabold transition ${activeMainTab === 'tracking' ? 'bg-white text-red-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+                                            >
+                                                🚚 운송장 엑셀 등록
+                                            </button>
+                                            <button
+                                                onClick={() => { setActiveMainTab('export'); setGlobalSearchResults(null); }}
+                                                className={`px-3 py-1 rounded-md text-xs font-extrabold transition ${activeMainTab === 'export' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+                                            >
+                                                📊 발주용 / 배송용 엑셀
+                                            </button>
+                                        </div>
                                     )}
                                 </div>
 
@@ -3078,9 +3279,11 @@
 
                                                             <button
                                                                 type="button"
-                                                                onClick={() => openModal(`'${g.nick}' 롯데택배 송장번호 입력`, 'prompt', (val) => {
+                                                                onClick={() => openModal(`'${g.nick}' 롯데택배 송장번호 입력 (확인 즉시 자동저장됩니다)`, 'prompt', (val) => {
                                                                     const cleanT = String(val || '').replace(/[^0-9,-]/g, '').trim();
-                                                                    updateCustomerGroup(g.nick, cur => ({ ...cur, trackingNumber: cleanT }));
+                                                                    const nextGroups = customerGroups.map(cur => cur.nick === g.nick ? { ...cur, trackingNumber: cleanT } : cur);
+                                                                    setCustomerGroups(nextGroups);
+                                                                    saveUpdatedGroupsImmediately(nextGroups, `📦 '${g.nick}' 송장번호(${cleanT || '삭제'})가 시트와 고객 포털에 즉시 저장되었습니다!`);
                                                                 }, g.trackingNumber || '', '송장번호 입력')}
                                                                 className={`px-2 py-0.5 rounded text-[11px] font-extrabold border ${
                                                                     g.trackingNumber ? 'bg-red-50 text-red-600 border-red-200' : 'bg-white text-slate-500 border-slate-300'
@@ -3507,6 +3710,9 @@
                                                                         const val = e.target.value.replace(/[^0-9,-]/g, '');
                                                                         setCsGroups(prev => prev.map(x => x.id === cs.id ? { ...x, csTracking: val } : x));
                                                                         setHasUnsavedChanges(true);
+                                                                    }}
+                                                                    onBlur={() => {
+                                                                        syncCsGroupsToFirebase(csGroups);
                                                                     }}
                                                                     placeholder="송장번호 입력"
                                                                     className="w-28 bg-transparent text-[11px] font-extrabold text-blue-900 outline-none"
