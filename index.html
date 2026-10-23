@@ -49,7 +49,7 @@
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 306; // 306 => v3.06
+        const VERSION_STEP = 308; // 308 => v3.08
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.24";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzrMczblUPLxqGESdkZks8osdL-CihDenW94Ae3ODL8u_QhVAZGKrsVI_KchtHjCTFg/exec';
@@ -308,8 +308,19 @@
 
                 memo = cleanMemoText(memo, address);
 
-                // ✨ A열(닉네임)이 실수로 비어있더라도 B열에 방송명이 있고 C열(수량)에 무료배송 기준(예: 70000, 200000)이 적힌 메타 행이면 구분선으로 자동 인식!
-                const isImplicitWorkspaceMeta = (!nick && prod && Number(qtyVal) >= 10000 && (Number(priceVal) === 4000 || Number(priceVal) === 0 || Number(shipVal) === 10));
+                // ✨ 시트 중간이나 제일 하단(몇 번째 줄이든 상관없이!)에 붙여넣은 방송 구분선 줄을 100% 인식!
+                // 1) A열에 ___WORKSPACE_META___ 가 있거나,
+                // 2) A열이 비어있더라도 B열에 방송명이 있고 수령인/연락처/주소가 모두 비어있는 메타 행이면 무조건 새 방송 블록 시작점으로 인식!
+                const isImplicitWorkspaceMeta = (
+                    !nick &&
+                    prod &&
+                    prod !== '상품명' &&
+                    prod !== '품목' &&
+                    !realname &&
+                    !phone &&
+                    !address &&
+                    (Number(qtyVal) >= 10000 || Number(priceVal) === 4000 || Number(priceVal) === 3000 || Number(shipVal) === 10 || Number(depVal) === 0)
+                );
                 if (nick.startsWith('___WORKSPACE') || isImplicitWorkspaceMeta) {
                     if (prod) {
                         curBName = cleanDisplayTabName(prod);
@@ -1980,11 +1991,21 @@
                     const buildRowsForBroadcast = (bTitle, fThresh, dShip, cRate, groupsArr) => {
                         const rows = [{
                             '닉네임': '___WORKSPACE_META___',
+                            '주문자': '___WORKSPACE_META___',
+                            customer: '___WORKSPACE_META___',
+                            nickname: '___WORKSPACE_META___',
+                            name: '___WORKSPACE_META___',
                             '상품명': bTitle,
+                            product: bTitle,
                             '수량': Number(fThresh) || 70000,
+                            quantity: Number(fThresh) || 70000,
+                            qty: Number(fThresh) || 70000,
                             '단가(제품금액)': Number(dShip) || 4000,
+                            price: Number(dShip) || 4000,
                             '배송비': Number(cRate) || 10,
+                            shipping: Number(cRate) || 10,
                             '입금액': 0,
+                            deposit: 0,
                             '카드결제': '', '수령인명': '', '연락처': '', '주소': '', '요청사항': '',
                             'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
                         }];
@@ -2002,11 +2023,21 @@
                                 const waitCell = it.isWaitlist ? `대기${it.waitlistOrder || 1}번` : '';
                                 rows.push({
                                     '닉네임': g.nick,
+                                    '주문자': g.nick,
+                                    customer: g.nick,
+                                    nickname: g.nick,
+                                    name: g.nick,
                                     '상품명': it.product || '',
+                                    product: it.product || '',
                                     '수량': Number(it.qty) || 1,
+                                    quantity: Number(it.qty) || 1,
+                                    qty: Number(it.qty) || 1,
                                     '단가(제품금액)': Number(it.price) || 0,
+                                    price: Number(it.price) || 0,
                                     '배송비': sum.ship,
+                                    shipping: sum.ship,
                                     '입금액': idx === 0 ? sum.dep : 0,
+                                    deposit: idx === 0 ? sum.dep : 0,
                                     '카드결제': cardStr,
                                     '수령인명': g.realname || '',
                                     '연락처': cleanPh ? "'" + cleanPh : '',
@@ -2195,11 +2226,21 @@
                     const buildRows = (bTitle, fThresh, dShip, cRate, groupsArr) => {
                         const rows = [{
                             '닉네임': '___WORKSPACE_META___',
+                            '주문자': '___WORKSPACE_META___',
+                            customer: '___WORKSPACE_META___',
+                            nickname: '___WORKSPACE_META___',
+                            name: '___WORKSPACE_META___',
                             '상품명': bTitle,
+                            product: bTitle,
                             '수량': Number(fThresh) || 70000,
+                            quantity: Number(fThresh) || 70000,
+                            qty: Number(fThresh) || 70000,
                             '단가(제품금액)': Number(dShip) || 4000,
+                            price: Number(dShip) || 4000,
                             '배송비': Number(cRate) || 10,
+                            shipping: Number(cRate) || 10,
                             '입금액': 0,
+                            deposit: 0,
                             '카드결제': '', '수령인명': '', '연락처': '', '주소': '', '요청사항': '',
                             'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
                         }];
@@ -2217,11 +2258,21 @@
                                 const waitCell = it.isWaitlist ? `대기${it.waitlistOrder || 1}번` : '';
                                 rows.push({
                                     '닉네임': g.nick,
+                                    '주문자': g.nick,
+                                    customer: g.nick,
+                                    nickname: g.nick,
+                                    name: g.nick,
                                     '상품명': it.product || '',
+                                    product: it.product || '',
                                     '수량': Number(it.qty) || 1,
+                                    quantity: Number(it.qty) || 1,
+                                    qty: Number(it.qty) || 1,
                                     '단가(제품금액)': Number(it.price) || 0,
+                                    price: Number(it.price) || 0,
                                     '배송비': sum.ship,
+                                    shipping: sum.ship,
                                     '입금액': idx === 0 ? sum.dep : 0,
+                                    deposit: idx === 0 ? sum.dep : 0,
                                     '카드결제': cardStr,
                                     '수령인명': g.realname || '',
                                     '연락처': cleanPh ? "'" + cleanPh : '',
