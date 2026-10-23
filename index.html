@@ -49,9 +49,9 @@
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 305; // 305 => v3.05
+        const VERSION_STEP = 306; // 306 => v3.06
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
-        const LAST_MODIFIED_DATE = "2026.10.23";
+        const LAST_MODIFIED_DATE = "2026.10.24";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzrMczblUPLxqGESdkZks8osdL-CihDenW94Ae3ODL8u_QhVAZGKrsVI_KchtHjCTFg/exec';
         const DEFAULT_STAFF_SHEET_ID = '1sM5bkDqEjD6Kpxu2yoJe2aiMuqpcWLMAIGpY3iL5_x8';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
@@ -308,10 +308,9 @@
 
                 memo = cleanMemoText(memo, address);
 
-                if (!nick || nick === '닉네임' || nick === '주문자') return;
-
-                // ___WORKSPACE___ 구분선을 만나면 새로운 방송일+이름 블록으로 전환!
-                if (nick.startsWith('___WORKSPACE')) {
+                // ✨ A열(닉네임)이 실수로 비어있더라도 B열에 방송명이 있고 C열(수량)에 무료배송 기준(예: 70000, 200000)이 적힌 메타 행이면 구분선으로 자동 인식!
+                const isImplicitWorkspaceMeta = (!nick && prod && Number(qtyVal) >= 10000 && (Number(priceVal) === 4000 || Number(priceVal) === 0 || Number(shipVal) === 10));
+                if (nick.startsWith('___WORKSPACE') || isImplicitWorkspaceMeta) {
                     if (prod) {
                         curBName = cleanDisplayTabName(prod);
                     } else if (defaultTabName && !['메인주문', '주문', '주문통합', '시트1', 'Sheet1'].includes(cleanDisplayTabName(defaultTabName))) {
@@ -325,6 +324,8 @@
                     ensureBlock(curBName, curMeta);
                     return;
                 }
+
+                if (!nick || nick === '닉네임' || nick === '주문자') return;
 
                 const blk = ensureBlock(curBName, curMeta);
                 const gMap = blk.groupsMap;
@@ -449,11 +450,12 @@
                     const prodForShip = activeItems.reduce((s, i) => s + (Number(i.price) > 0 ? Number(i.price) : 0), 0);
                     let computedShip = 0;
                     if (activeItems.length > 0 && prodForShip > 0 && !g.isVip) {
-                        const isJeju = Boolean(cleanAddr && cleanAddr.includes('제주'));
-                        const isFreeShip = Number(fThresh) > 0 && prodForShip >= Number(fThresh);
-                        if (g.shipping !== undefined && g.shipping !== '' && Number(g.shipping) !== 4000) {
+                        if (g.shipping !== undefined && g.shipping !== null && g.shipping !== '' && !isNaN(Number(g.shipping))) {
+                            // 시트 E열(배송비)에 기록된 값(4000, 7000, 0 등)을 최우선으로 그대로 유지!
                             computedShip = Number(g.shipping);
                         } else {
+                            const isJeju = Boolean(cleanAddr && cleanAddr.includes('제주'));
+                            const isFreeShip = Number(fThresh) > 0 && prodForShip >= Number(fThresh);
                             computedShip = (isFreeShip ? 0 : 4000) + (isJeju ? 3000 : 0);
                         }
                     }
@@ -1900,11 +1902,12 @@
 
                 let ship = 0;
                 if (activeItems.length > 0 && prodForShip > 0 && !g.isVip) {
-                    const isJeju = Boolean(g.address && g.address.includes('제주'));
-                    const isFreeShip = freeShipThreshold > 0 && prodForShip >= freeShipThreshold;
-                    if (g.shipping !== undefined && g.shipping !== '' && Number(g.shipping) !== defaultShipping) {
+                    // ✨ 시트 E열(배송비)에 명시적으로 적혀 있는 배송비(4000, 7000, 0 등)를 절대 무시하지 않고 100% 그대로 사용!
+                    if (g.shipping !== undefined && g.shipping !== null && g.shipping !== '' && !isNaN(Number(g.shipping))) {
                         ship = Number(g.shipping);
                     } else {
+                        const isJeju = Boolean(g.address && g.address.includes('제주'));
+                        const isFreeShip = freeShipThreshold > 0 && prodForShip >= freeShipThreshold;
                         const baseShip = isFreeShip ? 0 : defaultShipping;
                         const jejuExtra = isJeju ? 3000 : 0;
                         ship = baseShip + jejuExtra;
@@ -2903,25 +2906,13 @@
                                 <div className="flex gap-2">
                                     <button onClick={() => setCleanupModalOpen(false)} className="flex-1 py-2 bg-slate-100 text-slate-600 rounded-lg text-xs font-bold">닫기</button>
                                     <button
-                                        onClick={async () => {
-                                            const toDel = Object.keys(selectedOldTabs).filter(k => selectedOldTabs[k]);
-                                            if (toDel.length === 0) return;
-                                            const res = await fetchGas(activeGasUrl, {
-                                                action: 'delete_old_order_tabs',
-                                                masterId: activeStaffSheetId,
-                                                tabNames: toDel
-                                            });
-                                            if (res && res.success) {
-                                                showToast(`🧹 ${res.deletedCount}개의 오래된 시트를 정리했습니다.`);
-                                                setCleanupModalOpen(false);
-                                                setSelectedOldTabs({});
-                                                loadInitialTabs();
-                                            }
-                                        }}
-                                        className="flex-1 py-2 bg-red-600 text-white rounded-lg text-xs font-extrabold hover:bg-red-700"
-                                    >
-                                        선택한 시트 삭제
-                                    </button>
+                                    onClick={() => { loadInitialTabs(true); loadCsOrders(); loadMasterAddresses(); }}
+                                    className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 flex items-center gap-1"
+                                    title="직원 전용 구글 시트에서 최신 데이터 다시 읽어오기"
+                                >
+                                    <Icon name="arrows-clockwise" weight="bold" className={isLoading ? "animate-spin text-blue-600" : ""} />
+                                    <span>시트동기화</span>
+                                </button>
                                 </div>
                             </div>
                         </div>
