@@ -49,7 +49,7 @@
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 302; // 302 => v3.02
+        const VERSION_STEP = 305; // 305 => v3.05
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.23";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzrMczblUPLxqGESdkZks8osdL-CihDenW94Ae3ODL8u_QhVAZGKrsVI_KchtHjCTFg/exec';
@@ -331,8 +331,13 @@
 
                 if (!gMap[nick]) {
                     let cardMode = 'none';
-                    if (cardRaw.includes('완료')) cardMode = 'completed';
-                    else if (cardRaw.startsWith('O') || cardRaw.includes('카드') || cardRaw === 'true') cardMode = 'requested';
+                    const cardOnlyStr = cardRaw.replace(/현영완료|현영요청|현영/g, '').replace(/\//g, '').trim();
+                    if (cardOnlyStr.includes('완료')) cardMode = 'completed';
+                    else if (cardOnlyStr.startsWith('O') || cardOnlyStr.includes('카드') || cardOnlyStr === 'true') cardMode = 'requested';
+
+                    let cashReceiptMode = 'none';
+                    if (cardRaw.includes('현영완료')) cashReceiptMode = 'completed';
+                    else if (cardRaw.includes('현영')) cashReceiptMode = 'requested';
 
                     let parsedDeposits = [];
                     if (depJsonRaw) {
@@ -353,6 +358,7 @@
                         shipping: isNaN(cleanShipNum) ? blk.defaultShipping : cleanShipNum,
                         deposit: 0,
                         cardMode: cardMode,
+                        cashReceiptMode: cashReceiptMode,
                         isVip: vipRaw === 'O' || vipRaw === 'true',
                         isNoShow: noShowRaw === 'O' || noShowRaw === 'true',
                         isConfirmed: confirmRaw === 'O' || confirmRaw === 'true',
@@ -366,8 +372,11 @@
                     if (!gMap[nick].realname && realname) gMap[nick].realname = realname;
                     if (!gMap[nick].phone && phone) gMap[nick].phone = fixPhoneNumber(phone);
                     if (!gMap[nick].address && address) gMap[nick].address = address;
-                    if (!gMap[nick].memo && memo) gMap[nick].memo = memo;
+                    if (!gMap[nick].memo && memo) gMap[nick].memo = memo.replace(/\[현영완료\]|\[현영요청\]|\[현영\]/g, '').trim();
                     if (!gMap[nick].trackingNumber && trkRaw) gMap[nick].trackingNumber = String(trkRaw).replace(/^'+/, '').trim();
+                    if ((!gMap[nick].cashReceiptMode || gMap[nick].cashReceiptMode === 'none') && (cardRaw.includes('현영') || memo.includes('[현영'))) {
+                        gMap[nick].cashReceiptMode = (cardRaw.includes('현영완료') || memo.includes('[현영완료]')) ? 'completed' : 'requested';
+                    }
                 }
 
                 const depNum = Number(String(depVal || '0').replace(/[^0-9.-]/g, '')) || 0;
@@ -432,7 +441,9 @@
                     const cleanPh = fixPhoneNumber(g.phone || '');
                     const pin4 = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
                     const cleanAddr = stripZipcode(g.address || '');
-                    const cardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
+                    const baseCardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
+                    const cashStr = g.cashReceiptMode === 'completed' ? '현영완료' : (g.cashReceiptMode === 'requested' ? '현영요청' : '');
+                    const cardStr = [baseCardStr, cashStr].filter(Boolean).join(' / ');
                     const custCred = Number(creditsMap?.[g.nick] ?? g.credit ?? 0) || 0;
                     const activeItems = (g.items || []).filter(i => !i.isWaitlist);
                     const prodForShip = activeItems.reduce((s, i) => s + (Number(i.price) > 0 ? Number(i.price) : 0), 0);
@@ -457,6 +468,7 @@
                         freeShippingThreshold: Number(fThresh) || 70000,
                         cardFeeRate: Number(cRate) || 10,
                         isCard: cardStr,
+                        cashReceipt: g.cashReceiptMode || 'none',
                         shipping: computedShip,
                         depositTotal: Number(g.deposit) || 0,
                         deposits: Array.isArray(g.deposits) ? g.deposits : [],
@@ -1459,54 +1471,6 @@
                     || null;
             }, [masterAddresses]);
 
-            const handleApplyMasterAddressToGroup = useCallback((targetNick, addrEntry) => {
-                if (!targetNick || !addrEntry) return;
-                const cleanPh = fixPhoneNumber(addrEntry.phone);
-                const cleanAddr = stripZipcode(addrEntry.address || '');
-                const cleanM = cleanMemoText(addrEntry.memo || '', cleanAddr);
-                const newPin = cleanPh.length >= 4 ? cleanPh.slice(-4) : '';
-
-                setCustomerGroups(prev => {
-                    const nextGroups = prev.map(g => g.nick === targetNick ? {
-                        ...g,
-                        realname: addrEntry.realname || g.realname,
-                        phone: cleanPh || g.phone,
-                        address: cleanAddr || g.address,
-                        memo: cleanM || g.memo,
-                        pin: newPin || g.pin
-                    } : g);
-
-                    // 로컬 방송 창고에도 즉시 반영하여 탭을 옮기거나 새로고침해도 절대 사라지지 않도록 보장!
-                    const cleanCur = cleanDisplayTabName(broadcastName || selectedTab || '');
-                    const tabKey = selectedTab || ('주문_' + cleanCur);
-                    if (cleanCur) {
-                        setLocalBroadcastStore(storePrev => {
-                            const nextStore = {
-                                ...storePrev,
-                                [tabKey]: {
-                                    ...(storePrev[tabKey] || {}),
-                                    broadcastName: cleanCur,
-                                    freeShipThreshold,
-                                    defaultShipping,
-                                    cardFeeRate,
-                                    updatedAt: Date.now(),
-                                    groups: nextGroups
-                                }
-                            };
-                            try {
-                                localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(nextStore));
-                                localStorage.setItem(STAFF_LOCAL_DIRTY_TIME_KEY, String(Date.now()));
-                            } catch (e) {}
-                            return nextStore;
-                        });
-                    }
-                    return nextGroups;
-                });
-
-                setHasUnsavedChanges(true);
-                showToast(`📗 '${targetNick}' 님께 찐고객사전 배송지가 즉시 적용되었습니다! [시트 저장 (Ctrl+S)]을 누르면 시트에 확정됩니다.`);
-            }, [broadcastName, selectedTab, freeShipThreshold, defaultShipping, cardFeeRate, showToast]);
-
             const loadInitialTabs = useCallback(async (forceRefreshFromSheet = false) => {
                 setIsLoading(true);
                 try {
@@ -2023,7 +1987,9 @@
                         }];
                         (groupsArr || []).forEach(g => {
                             const sum = getGroupSummary(g);
-                            const cardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
+                            const baseCardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
+                            const cashStr = g.cashReceiptMode === 'completed' ? '현영완료' : (g.cashReceiptMode === 'requested' ? '현영요청' : '');
+                            const cardStr = [baseCardStr, cashStr].filter(Boolean).join(' / ');
                             const cleanPh = fixPhoneNumber(g.phone);
                             const pinStr = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
                             const depJson = Array.isArray(g.deposits) && g.deposits.length > 0 ? JSON.stringify(g.deposits) : '';
@@ -2236,7 +2202,9 @@
                         }];
                         (groupsArr || []).forEach(g => {
                             const sum = getGroupSummary(g);
-                            const cardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
+                            const baseCardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
+                            const cashStr = g.cashReceiptMode === 'completed' ? '현영완료' : (g.cashReceiptMode === 'requested' ? '현영요청' : '');
+                            const cardStr = [baseCardStr, cashStr].filter(Boolean).join(' / ');
                             const cleanPh = fixPhoneNumber(g.phone);
                             const pinStr = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
                             const depJson = Array.isArray(g.deposits) && g.deposits.length > 0 ? JSON.stringify(g.deposits) : '';
@@ -2322,6 +2290,45 @@
                     return nextGroups;
                 });
             }, [broadcastName, selectedTab, freeShipThreshold, defaultShipping, cardFeeRate, customerCredits, saveUpdatedGroupsImmediately]);
+
+            const handleApplyMasterAddressToGroup = useCallback((targetNick, addrEntry) => {
+                if (!targetNick || !addrEntry) return;
+                const cleanPh = fixPhoneNumber(addrEntry.phone);
+                const cleanAddr = stripZipcode(addrEntry.address || '');
+                const cleanM = cleanMemoText(addrEntry.memo || '', cleanAddr);
+                const newPin = cleanPh.length >= 4 ? cleanPh.slice(-4) : '';
+                const cleanBName = cleanDisplayTabName(broadcastName || selectedTab || '');
+
+                setCustomerGroups(prev => {
+                    const nextGroups = prev.map(g => g.nick === targetNick ? {
+                        ...g,
+                        realname: addrEntry.realname || g.realname,
+                        phone: cleanPh || g.phone,
+                        address: cleanAddr || g.address,
+                        memo: cleanM || g.memo,
+                        pin: newPin || g.pin
+                    } : g);
+
+                    if (staffFbDb && cleanBName && cleanAddr) {
+                        const safeBKey = cleanBName.replace(/[.#$\[\]\/]/g, '_');
+                        const safeNickKey = String(targetNick).replace(/[.#$\[\]\/]/g, '_').trim();
+                        if (safeBKey && safeNickKey) {
+                            staffFbDb.ref(`ember_live_data/_portal_broadcast_addresses/${safeBKey}/${safeNickKey}`).set({
+                                nickname: targetNick,
+                                realname: addrEntry.realname || '',
+                                phone: cleanPh,
+                                address: cleanAddr,
+                                memo: cleanM,
+                                broadcastName: cleanBName,
+                                updatedAt: new Date().toISOString()
+                            }).catch(() => {});
+                        }
+                    }
+
+                    saveUpdatedGroupsImmediately(nextGroups, `📗 '${targetNick}' 님께 찐고객사전 배송지가 적용되어 시트와 고객 포털에 즉시 저장되었습니다!`);
+                    return nextGroups;
+                });
+            }, [broadcastName, selectedTab, saveUpdatedGroupsImmediately]);
 
             const handleRenameBroadcast = useCallback((targetTabToRename = null) => {
                 const baseTab = targetTabToRename || selectedTab || ('주문_' + broadcastName);
@@ -2449,6 +2456,7 @@
                         shipping: isCustomerVip ? 0 : defaultShipping,
                         deposit: 0,
                         cardMode: 'none',
+                        cashReceiptMode: 'none',
                         isVip: isCustomerVip,
                         isNoShow: false,
                         isConfirmed: false,
@@ -2718,6 +2726,9 @@
                     else if (sum.baseBal > 0) statusStr = `미입금(미수 ${sum.baseBal.toLocaleString()})`;
                     else if (sum.baseBal < 0) statusStr = `과납(${Math.abs(sum.baseBal).toLocaleString()})`;
 
+                    if (g.cashReceiptMode === 'completed') statusStr += ` / 현영완료(${sum.dep.toLocaleString()})`;
+                    else if (g.cashReceiptMode === 'requested') statusStr += ` / 현영요청(${sum.dep.toLocaleString()})`;
+
                     const makeRow = (prodStr) => ({
                         '방송명': broadcastName,
                         '결제상태': statusStr,
@@ -2743,7 +2754,7 @@
             };
 
             const stats = useMemo(() => {
-                let totalCustomers = 0, totalQty = 0, paidCount = 0, unpaidCount = 0, cardReqCount = 0, cardCompCount = 0, noAddrCount = 0, waitCount = 0;
+                let totalCustomers = 0, totalQty = 0, paidCount = 0, unpaidCount = 0, cardReqCount = 0, cardCompCount = 0, cashReqCount = 0, cashCompCount = 0, noAddrCount = 0, waitCount = 0;
                 customerGroups.forEach(g => {
                     const sum = getGroupSummary(g);
                     if (sum.waitItems.length > 0) waitCount++;
@@ -2751,12 +2762,14 @@
                     totalCustomers++;
                     totalQty += sum.activeItems.reduce((acc, it) => acc + (Number(it.qty) || 1), 0);
                     if (!g.address) noAddrCount++;
+                    if (g.cashReceiptMode === 'completed') cashCompCount++;
+                    else if (g.cashReceiptMode === 'requested') cashReqCount++;
                     if (g.cardMode === 'completed') cardCompCount++;
                     else if (g.cardMode === 'requested') cardReqCount++;
                     else if (sum.isPaid) paidCount++;
                     else unpaidCount++;
                 });
-                return { totalCustomers, totalQty, paidCount, unpaidCount, cardReqCount, cardCompCount, noAddrCount, waitCount };
+                return { totalCustomers, totalQty, paidCount, unpaidCount, cardReqCount, cardCompCount, cashReqCount, cashCompCount, noAddrCount, waitCount };
             }, [customerGroups, getGroupSummary]);
 
             const filteredGroups = useMemo(() => {
@@ -2767,6 +2780,8 @@
                     if (statusFilter === 'unpaid' && !(sum.baseBal > 0 && g.cardMode === 'none' && sum.activeItems.length > 0)) return false;
                     if (statusFilter === 'card_req' && g.cardMode !== 'requested') return false;
                     if (statusFilter === 'card_comp' && g.cardMode !== 'completed') return false;
+                    if (statusFilter === 'cash_req' && g.cashReceiptMode !== 'requested') return false;
+                    if (statusFilter === 'cash_comp' && g.cashReceiptMode !== 'completed') return false;
                     if (statusFilter === 'no_addr' && g.address) return false;
                     if (statusFilter === 'waitlist' && sum.waitItems.length === 0) return false;
 
@@ -2817,6 +2832,23 @@
                             const cleanA = stripZipcode(newAddr.address || '');
                             const cleanM = cleanMemoText(newAddr.memo || '', cleanA);
                             const newPin = cleanPh.length >= 4 ? cleanPh.slice(-4) : '';
+                            const cleanBName = cleanDisplayTabName(broadcastName || selectedTab || '');
+
+                            if (staffFbDb && cleanBName && cleanA) {
+                                const safeBKey = cleanBName.replace(/[.#$\[\]\/]/g, '_');
+                                const safeNickKey = String(targetNick).replace(/[.#$\[\]\/]/g, '_').trim();
+                                if (safeBKey && safeNickKey) {
+                                    staffFbDb.ref(`ember_live_data/_portal_broadcast_addresses/${safeBKey}/${safeNickKey}`).set({
+                                        nickname: targetNick,
+                                        realname: newAddr.realname || '',
+                                        phone: cleanPh,
+                                        address: cleanA,
+                                        memo: cleanM,
+                                        broadcastName: cleanBName,
+                                        updatedAt: new Date().toISOString()
+                                    }).catch(() => {});
+                                }
+                            }
 
                             setCustomerGroups(prev => {
                                 const nextGroups = prev.map(cur => cur.nick === targetNick ? {
@@ -3218,20 +3250,22 @@
 
                         {activeMainTab === 'orders' && (
                             <div className="space-y-2.5 w-full">
-                                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+                                <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-2">
                                     {[
                                         { id: 'all', label: '전체 주문현황', val: `${stats.totalCustomers}명 (${stats.totalQty}개)`, color: 'text-slate-900' },
                                         { id: 'paid', label: '완납', val: `${stats.paidCount}명`, color: 'text-emerald-600' },
                                         { id: 'unpaid', label: '미수금', val: `${stats.unpaidCount}명`, color: 'text-red-600' },
-                                        { id: 'card_req', label: '카드요청', val: `${stats.cardReqCount}명`, color: 'text-amber-600' },
-                                        { id: 'card_comp', label: '카드완료', val: `${stats.cardCompCount}명`, color: 'text-purple-600' },
+                                        { id: 'card_req', label: '💳 카드요청', val: `${stats.cardReqCount}명`, color: 'text-amber-600' },
+                                        { id: 'card_comp', label: '✅ 카드완료', val: `${stats.cardCompCount}명`, color: 'text-purple-600' },
+                                        { id: 'cash_req', label: '🧾 현영요청', val: `${stats.cashReqCount}명`, color: 'text-indigo-600' },
+                                        { id: 'cash_comp', label: '🧾 현영완료', val: `${stats.cashCompCount}명`, color: 'text-teal-600' },
                                         { id: 'no_addr', label: '주소미입력', val: `${stats.noAddrCount}명`, color: 'text-orange-600' },
                                         { id: 'waitlist', label: '⏱️ 품절대기', val: `${stats.waitCount}명`, color: 'text-amber-800' }
                                     ].map(card => (
                                         <div
                                             key={card.id}
                                             onClick={() => setStatusFilter(card.id)}
-                                            className={`bg-white px-3 py-2.5 rounded-xl border-2 cursor-pointer transition flex flex-col items-center justify-center text-center shadow-sm ${
+                                            className={`bg-white px-2.5 py-2 rounded-xl border-2 cursor-pointer transition flex flex-col items-center justify-center text-center shadow-sm ${
                                                 statusFilter === card.id ? 'border-blue-600 ring-2 ring-blue-600/10' : 'border-slate-200 hover:border-slate-300'
                                             }`}
                                         >
@@ -3326,6 +3360,7 @@
                                             const custCredit = getCustomerCreditAmount(g.nick);
                                             const borderColor = g.cardMode === 'completed' ? 'border-purple-300' :
                                                 g.cardMode === 'requested' ? 'border-amber-400' :
+                                                g.cashReceiptMode === 'requested' ? 'border-indigo-400' :
                                                 (!sum.isPaid && sum.baseBal > 0) ? 'border-red-300' : 'border-slate-200';
 
                                             return (
@@ -3333,6 +3368,7 @@
                                                     <div className={`px-3.5 py-2 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 ${
                                                         g.cardMode === 'completed' ? 'bg-purple-50/50' :
                                                         g.cardMode === 'requested' ? 'bg-amber-50/50' :
+                                                        g.cashReceiptMode === 'requested' ? 'bg-indigo-50/50' :
                                                         (!sum.isPaid && sum.baseBal > 0) ? 'bg-red-50/40' : 'bg-slate-50/70'
                                                     }`}>
                                                         <div className="flex items-center gap-1.5 flex-wrap">
@@ -3394,6 +3430,33 @@
                                                                         onClick={() => updateCustomerGroup(g.nick, cur => ({ ...cur, cardMode: 'none' }))}
                                                                         className="px-1.5 py-0.5 bg-white text-slate-400 hover:text-red-600 text-[10px] font-bold border-l"
                                                                         title="카드결제 해제"
+                                                                    >
+                                                                        ✕
+                                                                    </button>
+                                                                )}
+                                                            </div>
+
+                                                            <div className="inline-flex rounded overflow-hidden border border-slate-300">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => updateCustomerGroup(g.nick, cur => ({
+                                                                        ...cur,
+                                                                        cashReceiptMode: (!cur.cashReceiptMode || cur.cashReceiptMode === 'none') ? 'requested' : (cur.cashReceiptMode === 'requested' ? 'completed' : 'none')
+                                                                    }))}
+                                                                    className={`px-2 py-0.5 text-[11px] font-extrabold ${
+                                                                        g.cashReceiptMode === 'completed' ? 'bg-teal-600 text-white' :
+                                                                        g.cashReceiptMode === 'requested' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
+                                                                    }`}
+                                                                    title="클릭: 현영요청 ➔ 현영완료 ➔ 해제"
+                                                                >
+                                                                    {g.cashReceiptMode === 'completed' ? '✅ 현영완료' : g.cashReceiptMode === 'requested' ? '🧾 현영요청' : '🧾 현영'}
+                                                                </button>
+                                                                {g.cashReceiptMode && g.cashReceiptMode !== 'none' && (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => updateCustomerGroup(g.nick, cur => ({ ...cur, cashReceiptMode: 'none' }))}
+                                                                        className="px-1.5 py-0.5 bg-white text-slate-400 hover:text-red-600 text-[10px] font-bold border-l"
+                                                                        title="현금영수증 해제"
                                                                     >
                                                                         ✕
                                                                     </button>
@@ -3485,7 +3548,16 @@
                                                             </button>
                                                         </div>
 
-                                                        <div className="flex items-center gap-2 text-xs font-extrabold flex-wrap justify-end">
+                                                        <div className="flex items-center gap-2 text-xs font-extrabold flex-wrap justify-end ml-auto">
+                                                            {g.cashReceiptMode && g.cashReceiptMode !== 'none' && (
+                                                                <span className={`px-2 py-0.5 rounded border text-[11px] font-extrabold ${
+                                                                    g.cashReceiptMode === 'completed'
+                                                                        ? 'bg-teal-50 text-teal-700 border-teal-200'
+                                                                        : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                                                                }`}>
+                                                                    🧾 {g.cashReceiptMode === 'completed' ? '현영완료' : '현영발행대상'}: {(sum.dep > 0 ? sum.dep : sum.baseGrand).toLocaleString()}원
+                                                                </span>
+                                                            )}
                                                             {custCredit > 0 && (
                                                                 <div className="flex items-center gap-1">
                                                                     <span className="text-teal-800 bg-teal-50 px-2 py-0.5 rounded border border-teal-200 text-[11px] font-extrabold">
@@ -3503,7 +3575,6 @@
                                                                     )}
                                                                 </div>
                                                             )}
-                                                            <span className="text-slate-900 text-sm">총 {sum.finalGrand.toLocaleString()}원</span>
                                                             <button
                                                                 type="button"
                                                                 onClick={() => openModal(`'${g.nick}' 입금액 직접 수정`, 'prompt', (val) => {
@@ -3515,8 +3586,8 @@
                                                                 입금 {sum.dep.toLocaleString()}원 <Icon name="pencil-simple" size={11} />
                                                             </button>
                                                             {g.cardMode !== 'none' ? (
-                                                                <span className={g.cardMode === 'completed' ? 'text-purple-700' : 'text-amber-700'}>
-                                                                    ({g.cardMode === 'completed' ? '카드완료' : '카드결제 요청'} {Math.max(0, sum.finalBal).toLocaleString()}원)
+                                                                <span className={`px-2 py-0.5 rounded border text-[11px] ${g.cardMode === 'completed' ? 'bg-purple-50 text-purple-700 border-purple-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                                                                    {g.cardMode === 'completed' ? '카드완료' : '카드결제 요청'} {Math.max(0, sum.finalBal).toLocaleString()}원
                                                                 </span>
                                                             ) : sum.baseBal > 0 ? (
                                                                 <span className="text-red-600 bg-red-50 px-2 py-0.5 rounded border border-red-200">
@@ -3542,9 +3613,10 @@
                                                                         👉 적립금전환
                                                                     </button>
                                                                 </div>
-                                                            ) : (
-                                                                <span className="text-emerald-600">완납 (0원)</span>
-                                                            )}
+                                                            ) : null}
+                                                            <span className="text-slate-900 text-sm font-black pl-2 border-l border-slate-300 tabular-nums">
+                                                                총 {sum.finalGrand.toLocaleString()}원
+                                                            </span>
                                                         </div>
                                                     </div>
 
