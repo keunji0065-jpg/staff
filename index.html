@@ -49,9 +49,9 @@
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 300; // 300 => v3.00
+        const VERSION_STEP = 302; // 302 => v3.02
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
-        const LAST_MODIFIED_DATE = "2026.10.22";
+        const LAST_MODIFIED_DATE = "2026.10.23";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzrMczblUPLxqGESdkZks8osdL-CihDenW94Ae3ODL8u_QhVAZGKrsVI_KchtHjCTFg/exec';
         const DEFAULT_STAFF_SHEET_ID = '1sM5bkDqEjD6Kpxu2yoJe2aiMuqpcWLMAIGpY3iL5_x8';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
@@ -839,32 +839,39 @@
                             </div>
                             {(group.items || []).map((it, idx) => {
                                 const curTag = itemTags[idx] || '정상';
+                                const isModalCsItem = curTag !== '정상';
+                                const modalRowBoxStyle =
+                                    curTag === '미송' ? 'bg-purple-100/90 border border-purple-300 border-l-4 border-l-purple-600 rounded-lg my-1 px-2.5 py-2 shadow-sm' :
+                                    curTag === '교환' ? 'bg-blue-100/90 border border-blue-300 border-l-4 border-l-blue-600 rounded-lg my-1 px-2.5 py-2 shadow-sm' :
+                                    curTag === '반품' ? 'bg-rose-100/90 border border-rose-300 border-l-4 border-l-rose-600 rounded-lg my-1 px-2.5 py-2 shadow-sm' :
+                                    curTag === '불량/오배송' ? 'bg-red-100 border border-red-400 border-l-4 border-l-red-600 rounded-lg my-1 px-2.5 py-2 shadow-sm' :
+                                    'py-2 px-1 opacity-75';
                                 return (
-                                    <div key={idx} className="py-2 flex items-center justify-between gap-2 text-xs">
+                                    <div key={idx} className={`flex items-center justify-between gap-2 text-xs transition-all ${modalRowBoxStyle}`}>
                                         <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                                            <span className="text-slate-400 font-bold">•</span>
-                                            <span className={`font-bold truncate ${curTag !== '정상' ? 'text-slate-900 font-extrabold' : 'text-slate-600'}`}>{it.product}</span>
+                                            {!isModalCsItem && <span className="text-slate-400 font-bold">•</span>}
+                                            <span className={`truncate ${isModalCsItem ? 'text-slate-900 font-black text-[13px]' : 'text-slate-500 font-semibold'}`}>{it.product}</span>
                                         </div>
                                         <div className="flex items-center gap-2 shrink-0">
-                                            <span className="text-[11px] font-bold text-slate-500">
+                                            <span className={`text-[11px] font-bold ${isModalCsItem ? 'text-slate-800 font-extrabold' : 'text-slate-400'}`}>
                                                 {it.qty}개 · {Number(it.price).toLocaleString()}원
                                             </span>
                                             <select
                                                 value={curTag}
                                                 onChange={e => setItemTags(prev => ({ ...prev, [idx]: e.target.value }))}
                                                 className={`px-2 py-1 rounded border text-[11px] font-extrabold outline-none cursor-pointer shrink-0 ${
-                                                    curTag === '미송' ? 'bg-purple-100 text-purple-800 border-purple-400' :
-                                                    curTag === '교환' ? 'bg-blue-50 text-blue-700 border-blue-300' :
-                                                    curTag === '반품' ? 'bg-rose-50 text-rose-700 border-rose-300' :
+                                                    curTag === '미송' ? 'bg-purple-600 text-white border-purple-700' :
+                                                    curTag === '교환' ? 'bg-blue-600 text-white border-blue-700' :
+                                                    curTag === '반품' ? 'bg-rose-600 text-white border-rose-700' :
                                                     curTag === '불량/오배송' ? 'bg-red-600 text-white border-red-700' :
                                                     'bg-white text-slate-600 border-slate-300'
                                                 }`}
                                             >
-                                                <option value="정상">정상유지</option>
-                                                <option value="미송">📦 미송(발송대기)</option>
-                                                <option value="교환">🔄 교환요청</option>
-                                                <option value="반품">↩️ 반품요청</option>
-                                                <option value="불량/오배송">🚨 불량/오배송</option>
+                                                <option value="정상" className="bg-white text-slate-700">정상유지</option>
+                                                <option value="미송" className="bg-white text-purple-800">📦 미송(발송대기)</option>
+                                                <option value="교환" className="bg-white text-blue-700">🔄 교환요청</option>
+                                                <option value="반품" className="bg-white text-rose-700">↩️ 반품요청</option>
+                                                <option value="불량/오배송" className="bg-white text-red-700">🚨 불량/오배송</option>
                                             </select>
                                         </div>
                                     </div>
@@ -3877,31 +3884,38 @@
                                                     </div>
 
                                                     {/* 상품명 바로 위에 방송 이름 표시 + 품목 리스트 */}
-                                                    <div className="divide-y divide-slate-100 px-3.5 py-1.5">
-                                                        <div className="py-1 flex items-center gap-1.5 text-[11px] font-extrabold text-blue-700 bg-blue-50/50 -mx-3.5 px-3.5 border-b border-blue-100/80">
+                                                    <div className="px-3.5 py-2 space-y-1">
+                                                        <div className="py-1 flex items-center gap-1.5 text-[11px] font-extrabold text-blue-700 bg-blue-50/50 -mx-3.5 px-3.5 mb-1.5 border-b border-blue-100/80">
                                                             <Icon name="calendar-check" weight="fill" className="text-blue-600" size={13} />
                                                             <span>방송명: {cs.sourceBroadcast || '미지정 방송'}</span>
                                                         </div>
                                                         {(cs.items || []).map((it, idx) => {
                                                             const tag = it.csTag || '정상';
                                                             const isCsItem = tag !== '정상';
+                                                            const rowBoxStyle =
+                                                                tag === '미송' ? 'bg-purple-100/85 border-2 border-purple-300 border-l-4 border-l-purple-600 rounded-lg px-3 py-2 shadow-sm' :
+                                                                tag === '교환' ? 'bg-blue-100/85 border-2 border-blue-300 border-l-4 border-l-blue-600 rounded-lg px-3 py-2 shadow-sm' :
+                                                                tag === '반품' ? 'bg-rose-100/85 border-2 border-rose-300 border-l-4 border-l-rose-600 rounded-lg px-3 py-2 shadow-sm' :
+                                                                tag === '불량/오배송' ? 'bg-red-100 border-2 border-red-400 border-l-4 border-l-red-600 rounded-lg px-3 py-2 shadow-sm' :
+                                                                'px-2 py-1 border-b border-slate-100 last:border-b-0 opacity-65 hover:opacity-100';
+
                                                             return (
-                                                                <div key={idx} className={`py-1.5 flex items-center justify-between gap-2 text-xs ${
-                                                                    tag === '미송' ? 'bg-purple-50/60 -mx-3.5 px-3.5' :
-                                                                    isCsItem ? 'bg-rose-50/40 -mx-3.5 px-3.5' : ''
-                                                                }`}>
+                                                                <div key={idx} className={`flex items-center justify-between gap-2 text-xs transition-all ${rowBoxStyle}`}>
                                                                     <div className="flex items-center gap-2 flex-1 min-w-0">
-                                                                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                                                            tag === '미송' ? 'bg-purple-600' :
-                                                                            tag === '반품' ? 'bg-rose-500' :
-                                                                            tag === '교환' ? 'bg-blue-500' :
-                                                                            tag === '불량/오배송' ? 'bg-red-600' : 'bg-slate-300'
-                                                                        }`}></span>
-                                                                        <span className={`truncate ${isCsItem ? 'font-extrabold text-slate-900' : 'font-semibold text-slate-500'}`}>
+                                                                        {!isCsItem && (
+                                                                            <span className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0 ml-1"></span>
+                                                                        )}
+                                                                        <span className={`truncate ${
+                                                                            tag === '미송' ? 'font-black text-[13.5px] text-purple-950' :
+                                                                            tag === '교환' ? 'font-black text-[13.5px] text-blue-950' :
+                                                                            tag === '반품' ? 'font-black text-[13.5px] text-rose-950' :
+                                                                            tag === '불량/오배송' ? 'font-black text-[13.5px] text-red-950' :
+                                                                            'font-medium text-slate-500'
+                                                                        }`}>
                                                                             {it.product}
                                                                         </span>
                                                                     </div>
-                                                                    <div className="flex items-center gap-2.5 shrink-0 text-xs font-bold text-slate-700">
+                                                                    <div className={`flex items-center gap-2.5 shrink-0 text-xs ${isCsItem ? 'font-black text-slate-900' : 'font-semibold text-slate-500'}`}>
                                                                         <span>{it.qty}개</span>
                                                                         <span className="w-20 text-right tabular-nums">{Number(it.price || 0).toLocaleString()}원</span>
                                                                         <select
@@ -3915,19 +3929,19 @@
                                                                                 setCsGroups(nextCsList);
                                                                                 saveCsOrdersToSheetImmediate(nextCsList, `✅ 품목 상태가 [${nextTag}](으)로 시트에 즉시 저장되었습니다!`);
                                                                             }}
-                                                                            className={`px-2 py-0.5 rounded text-[11px] font-extrabold border outline-none cursor-pointer shrink-0 ${
-                                                                                tag === '미송' ? 'bg-purple-100 text-purple-800 border-purple-400' :
-                                                                                tag === '교환' ? 'bg-blue-50 text-blue-700 border-blue-300' :
-                                                                                tag === '반품' ? 'bg-rose-50 text-rose-700 border-rose-300' :
+                                                                            className={`px-2 py-1 rounded-md text-[11px] font-extrabold border outline-none cursor-pointer shrink-0 shadow-sm ${
+                                                                                tag === '미송' ? 'bg-purple-600 text-white border-purple-700' :
+                                                                                tag === '교환' ? 'bg-blue-600 text-white border-blue-700' :
+                                                                                tag === '반품' ? 'bg-rose-600 text-white border-rose-700' :
                                                                                 tag === '불량/오배송' ? 'bg-red-600 text-white border-red-700' :
                                                                                 'bg-white text-slate-500 border-slate-200'
                                                                             }`}
                                                                         >
-                                                                            <option value="정상">정상유지</option>
-                                                                            <option value="미송">📦 미송(발송대기)</option>
-                                                                            <option value="교환">🔄 교환요청</option>
-                                                                            <option value="반품">↩️ 반품요청</option>
-                                                                            <option value="불량/오배송">🚨 불량/오배송</option>
+                                                                            <option value="정상" className="bg-white text-slate-700">정상유지</option>
+                                                                            <option value="미송" className="bg-white text-purple-800">📦 미송(발송대기)</option>
+                                                                            <option value="교환" className="bg-white text-blue-700">🔄 교환요청</option>
+                                                                            <option value="반품" className="bg-white text-rose-700">↩️ 반품요청</option>
+                                                                            <option value="불량/오배송" className="bg-white text-red-700">🚨 불량/오배송</option>
                                                                         </select>
                                                                     </div>
                                                                 </div>
