@@ -77,9 +77,9 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 341; // 341 => v3.41
+        const VERSION_STEP = 343; // 343 => v3.43
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
-        const LAST_MODIFIED_DATE = "2026.10.24";
+        const LAST_MODIFIED_DATE = "2026.10.25";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbx_kCIKu48TAyTmxSv0lu_DUk-rPeth_v0dDf9QCDC03cHEX43Zd3inDJ3Q6cFv87Q/exec';
         const DEFAULT_STAFF_SHEET_ID = '1sM5bkDqEjD6Kpxu2yoJe2aiMuqpcWLMAIGpY3iL5_x8';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
@@ -1265,6 +1265,7 @@
             const [newProd, setNewProd] = useState('');
             const [newQty, setNewQty] = useState(1);
             const [newPrice, setNewPrice] = useState('');
+            const [showMobileAddForm, setShowMobileAddForm] = useState(false);
 
             // 🎥 직원용 라이브 주문서 전용 상태 (로컬 자동저장 적용으로 새로고침/탭 이동 시에도 절대 증발하지 않음!)
             const [sharedYtApiKey, setSharedYtApiKey] = useState(() => {
@@ -4343,72 +4344,135 @@
                             </div>
                         </div>
 
-                        <div className="flex items-center gap-2 flex-wrap flex-1 justify-end">
-                            <div className="flex items-center gap-1.5 w-full sm:w-auto sm:min-w-[300px] max-w-md">
-                                <div className="relative flex-1">
-                                    <Icon name="globe" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-indigo-500" size={14} />
-                                    <input
-                                        type="text"
-                                        value={globalKeyword}
-                                        onChange={e => { setGlobalKeyword(e.target.value); if (!e.target.value.trim()) setGlobalSearchResults(null); }}
-                                        onKeyDown={e => { if (e.key === 'Enter') handleGlobalSearch(); }}
-                                        placeholder="전체 방송 + CS 통합검색 (닉네임/수령인/송장 등)"
-                                        className="w-full pl-8 pr-7 py-1.5 bg-indigo-50/50 border border-indigo-200 rounded-lg text-xs font-bold outline-none focus:bg-white focus:border-indigo-600"
-                                    />
-                                    {globalKeyword && (
-                                        <button onClick={() => { setGlobalKeyword(''); setGlobalSearchResults(null); }} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-                                            <Icon name="x-circle" weight="fill" size={14} />
-                                        </button>
-                                    )}
-                                </div>
+                        <div className="flex items-center gap-1.5 flex-wrap flex-1 justify-end">
+                            <div className="relative flex-1 min-w-[160px] max-w-xs">
+                                <Icon name="magnifying-glass" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" size={13} />
+                                <input
+                                    type="text"
+                                    value={globalKeyword}
+                                    onChange={e => setGlobalKeyword(e.target.value)}
+                                    onKeyDown={e => { if (e.key === 'Enter') handleGlobalSearch(); }}
+                                    placeholder="전 방송 통합검색 (닉네임/수령인/연락처/상품)..."
+                                    className="w-full pl-7 pr-14 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-extrabold text-slate-800 outline-none focus:bg-white focus:border-blue-600"
+                                />
                                 <button
+                                    type="button"
                                     onClick={handleGlobalSearch}
                                     disabled={isSearchingGlobal}
-                                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-extrabold shrink-0 shadow-sm flex items-center gap-1"
+                                    className="absolute right-1 top-1/2 -translate-y-1/2 px-2 py-0.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[10px] font-extrabold"
                                 >
-                                    <Icon name="magnifying-glass" weight="bold" />
-                                    <span>{isSearchingGlobal ? '검색중...' : '통합검색'}</span>
+                                    {isSearchingGlobal ? '...' : '통합검색'}
                                 </button>
                             </div>
 
                             <button
-                                onClick={() => { loadInitialTabs(false); loadCsOrders(); loadMasterAddresses(); }}
-                                className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 flex items-center gap-1"
-                                title="직원 전용 구글 시트에서 최신 데이터 다시 읽어오기"
+                                type="button"
+                                onClick={() => {
+                                    loadInitialTabs(true);
+                                    loadCsOrders();
+                                    loadMasterAddresses();
+                                    showToast('🔄 최신 시트 데이터를 다시 불러왔습니다.');
+                                }}
+                                className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-extrabold flex items-center gap-1 border border-slate-200 shrink-0"
+                                title="구글 시트에서 최신 주문서와 CS 내역을 다시 불러옵니다"
                             >
-                                <Icon name="arrows-clockwise" weight="bold" className={isLoading ? "animate-spin text-blue-600" : ""} />
-                                <span>시트동기화</span>
+                                <Icon name="arrows-clockwise" weight="bold" size={13} className={isLoading ? 'animate-spin text-blue-600' : ''} />
+                                <span className="hidden sm:inline">시트동기화</span>
                             </button>
 
                             <button
+                                type="button"
                                 onClick={handleSaveAll}
                                 disabled={isSaving}
-                                className={`px-3.5 py-1.5 rounded-lg text-xs font-extrabold text-white shadow-sm flex items-center gap-1 transition-all ${
-                                    hasUnsavedChanges
-                                        ? 'bg-amber-600 hover:bg-amber-700 ring-2 ring-amber-300 animate-pulse'
-                                        : 'bg-emerald-600 hover:bg-emerald-700'
+                                className={`px-3 py-1.5 rounded-lg text-xs font-extrabold flex items-center gap-1 shadow-sm shrink-0 transition ${
+                                    isSaving
+                                        ? 'bg-slate-400 text-white'
+                                        : 'bg-emerald-600 hover:bg-emerald-700 text-white'
                                 }`}
+                                title="현재 주문서와 교환반품CS 내역을 구글 시트에 즉시 저장 (단축키: Ctrl+S)"
                             >
-                                <Icon name="floppy-disk" weight="fill" />
-                                <span>{isSaving ? '저장중...' : (hasUnsavedChanges ? '● 직원시트에 저장 (Ctrl+S)' : '시트 저장 (Ctrl+S)')}</span>
+                                <Icon name="floppy-disk" weight="fill" size={14} />
+                                <span>{isSaving ? '저장중...' : '시트 저장'}</span>
                             </button>
 
                             <button
                                 type="button"
                                 onClick={handleLockScreen}
-                                className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 flex items-center gap-1"
+                                className="p-1.5 bg-slate-100 hover:bg-red-50 text-slate-500 hover:text-red-600 rounded-lg border border-slate-200 shrink-0"
                                 title="화면 잠금"
                             >
-                                <Icon name="lock-key" weight="bold" />
-                                <span>잠금</span>
+                                <Icon name="lock-key" weight="bold" size={15} />
                             </button>
                         </div>
                     </header>
 
-                    <div className="flex-1 flex overflow-hidden">
-                        {/* 📅 좌측 방송 날짜/이름 목록 사이드바 (라이브 주문서 작성 중에는 숨김!) */}
+                    <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
+                        {/* 📱 모바일 전용 상단 방송 선택 & CS 전환 바 (휴대폰 화면에서만 표시됨) */}
                         {activeMainTab !== 'live_order' && (
-                        <aside className="w-56 sm:w-64 bg-white border-r border-slate-200 flex flex-col shrink-0 select-none shadow-sm z-10">
+                            <div className="md:hidden bg-white border-b border-slate-200 px-3 py-2 flex items-center gap-1.5 shrink-0 shadow-sm z-20">
+                                <div className="relative flex-1 min-w-0">
+                                    <select
+                                        value={activeMainTab === 'cs' ? '__CS_MODE__' : selectedTab}
+                                        onChange={(e) => {
+                                            const val = e.target.value;
+                                            if (val === '__CS_MODE__') {
+                                                setActiveMainTab('cs');
+                                                setGlobalSearchResults(null);
+                                            } else {
+                                                setSelectedTab(val);
+                                                setLocalSearchTerm('');
+                                                setGlobalSearchResults(null);
+                                                setActiveMainTab('orders');
+                                                loadSheetOrders(val);
+                                            }
+                                        }}
+                                        className="w-full bg-slate-50 border border-slate-300 rounded-xl pl-3 pr-8 py-2 text-xs font-extrabold text-slate-900 outline-none focus:border-blue-600 appearance-none truncate"
+                                    >
+                                        <option value="__CS_MODE__">
+                                            🔄 미송 / 교환 / 반품 통합 ({csGroups.filter(c => c.csStatus !== '처리완료').length}/{csGroups.length})
+                                        </option>
+                                        {orderTabs.map(tab => {
+                                            const cleanName = cleanDisplayTabName(tab);
+                                            const cnt = localBroadcastStore[tab]?.groups?.length;
+                                            return (
+                                                <option key={tab} value={tab}>
+                                                    📅 {cleanName} {cnt !== undefined ? `(${cnt}명)` : ''}
+                                                </option>
+                                            );
+                                        })}
+                                    </select>
+                                    <Icon name="caret-down" weight="bold" size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+                                </div>
+
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        if (activeMainTab === 'cs') {
+                                            setActiveMainTab('orders');
+                                        } else {
+                                            setActiveMainTab('cs');
+                                            setGlobalSearchResults(null);
+                                        }
+                                    }}
+                                    className={`px-3 py-2 rounded-xl text-xs font-extrabold shrink-0 border transition flex items-center gap-1 ${
+                                        activeMainTab === 'cs'
+                                            ? 'bg-rose-600 text-white border-rose-700 shadow-sm'
+                                            : 'bg-rose-50 text-rose-700 border-rose-200'
+                                    }`}
+                                >
+                                    <span>🔄 CS</span>
+                                    <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-black ${
+                                        activeMainTab === 'cs' ? 'bg-white text-rose-600' : 'bg-rose-600 text-white'
+                                    }`}>
+                                        {csGroups.filter(c => c.csStatus !== '처리완료').length}
+                                    </span>
+                                </button>
+                            </div>
+                        )}
+
+                        {/* 📅 좌측 방송 날짜/이름 목록 사이드바 (PC 화면에서만 표시, 모바일에서는 숨김!) */}
+                        {activeMainTab !== 'live_order' && (
+                        <aside className="hidden md:flex w-56 lg:w-64 bg-white border-r border-slate-200 flex-col shrink-0 select-none shadow-sm z-10">
                             <div className="p-2.5 border-b border-slate-200 bg-slate-50/70">
                                 <button
                                     type="button"
@@ -4698,8 +4762,8 @@
 
                             {/* 📌 스크롤을 내려도 절대 움직이지 않고 상단에 고정되는 대시보드 & 컨트롤 영역 */}
                             {activeMainTab === 'orders' && (
-                                <div className="px-3 sm:px-4 pt-2.5 pb-2 bg-slate-100 border-b border-slate-200/80 space-y-2 shrink-0 z-20 shadow-sm">
-                                    <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-2">
+                                <div className="px-2.5 sm:px-4 pt-2 pb-2 bg-slate-100 border-b border-slate-200/80 space-y-2 shrink-0 z-20 shadow-sm">
+                                    <div className="flex md:grid md:grid-cols-5 lg:grid-cols-9 gap-1.5 sm:gap-2 overflow-x-auto pb-0.5 scrollbar-hide">
                                         {[
                                             { id: 'all', label: '전체 주문현황', val: `${stats.totalCustomers}명 (${stats.totalQty}개)`, color: 'text-slate-900' },
                                             { id: 'paid', label: '완납', val: `${stats.paidCount}명`, color: 'text-emerald-600' },
@@ -4714,21 +4778,55 @@
                                             <div
                                                 key={card.id}
                                                 onClick={() => setStatusFilter(card.id)}
-                                                className={`bg-white px-2.5 py-2 rounded-xl border-2 cursor-pointer transition flex flex-col items-center justify-center text-center shadow-sm ${
+                                                className={`bg-white px-2.5 py-1.5 sm:py-2 rounded-xl border-2 cursor-pointer transition flex flex-col items-center justify-center text-center shadow-sm shrink-0 min-w-[82px] md:min-w-0 ${
                                                     statusFilter === card.id ? 'border-blue-600 ring-2 ring-blue-600/10' : 'border-slate-200 hover:border-slate-300'
                                                 }`}
                                             >
-                                                <span className="text-[11px] font-bold text-slate-500 whitespace-nowrap mb-0.5">{card.label}</span>
-                                                <span className={`text-sm font-black whitespace-nowrap ${card.color}`}>{card.val}</span>
+                                                <span className="text-[10.5px] sm:text-[11px] font-bold text-slate-500 whitespace-nowrap mb-0.5">{card.label}</span>
+                                                <span className={`text-xs sm:text-sm font-black whitespace-nowrap ${card.color}`}>{card.val}</span>
                                             </div>
                                         ))}
                                     </div>
 
-                                    <form onSubmit={handleSingleAddOrder} className="bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center gap-2 text-xs relative">
+                                    {/* 📱 모바일 전용: 방송 내 검색창 + [+주문추가] 펼치기 버튼 한 줄 배치 */}
+                                    <div className="flex md:hidden items-center gap-1.5">
+                                        <div className="relative flex-1">
+                                            <Icon name="magnifying-glass" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-blue-600" size={14} />
+                                            <input
+                                                type="text"
+                                                value={localSearchTerm}
+                                                onChange={e => setLocalSearchTerm(e.target.value)}
+                                                placeholder={`[${selectedTab ? cleanDisplayTabName(selectedTab) : '현재 방송'}] 닉네임·수령인·상품 검색...`}
+                                                className="w-full pl-8 pr-7 py-2 bg-white border border-slate-300 rounded-xl text-xs font-extrabold text-slate-800 outline-none focus:border-blue-600 shadow-sm"
+                                            />
+                                            {localSearchTerm && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setLocalSearchTerm('')}
+                                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                                                >
+                                                    <Icon name="x-circle" weight="fill" size={14} />
+                                                </button>
+                                            )}
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowMobileAddForm(prev => !prev)}
+                                            className={`px-3 py-2 rounded-xl text-xs font-extrabold shrink-0 border shadow-sm transition ${
+                                                showMobileAddForm
+                                                    ? 'bg-slate-800 text-white border-slate-900'
+                                                    : 'bg-white text-slate-700 border-slate-300'
+                                            }`}
+                                        >
+                                            {showMobileAddForm ? '닫기 ▲' : '+ 주문추가'}
+                                        </button>
+                                    </div>
+
+                                    <form onSubmit={handleSingleAddOrder} className={`${showMobileAddForm ? 'flex' : 'hidden md:flex'} bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm flex-wrap items-center gap-2 text-xs relative`}>
                                         <span className="font-extrabold text-slate-700 flex items-center gap-1 shrink-0">
                                             <Icon name="plus-circle" weight="fill" className="text-blue-600" /> 단일 주문 추가:
                                         </span>
-                                        <div className="relative">
+                                        <div className="relative w-full sm:w-auto">
                                             <input
                                                 type="text"
                                                 value={newNick}
@@ -4736,7 +4834,7 @@
                                                 onBlur={() => setTimeout(() => setShowNewNickSuggest(false), 180)}
                                                 onChange={e => { setNewNick(e.target.value); setShowNewNickSuggest(true); }}
                                                 placeholder="닉네임 (찐고객사전 자동연동)"
-                                                className="w-44 border border-slate-300 rounded-lg px-2.5 py-1.5 font-bold outline-none focus:border-blue-600"
+                                                className="w-full sm:w-44 border border-slate-300 rounded-lg px-2.5 py-1.5 font-bold outline-none focus:border-blue-600"
                                             />
                                             {showNewNickSuggest && newNickSuggestions.length > 0 && (
                                                 <div className="absolute left-0 top-full mt-1 w-72 bg-white border border-slate-300 rounded-xl shadow-xl z-50 overflow-hidden divide-y divide-slate-100">
@@ -4767,7 +4865,7 @@
                                             value={newProd}
                                             onChange={e => setNewProd(e.target.value)}
                                             placeholder="상품명 입력 (적립금 차감시 '적립금' 입력)"
-                                            className="flex-1 min-w-[180px] border border-slate-300 rounded-lg px-2.5 py-1.5 font-bold outline-none focus:border-blue-600"
+                                            className="flex-1 min-w-[160px] border border-slate-300 rounded-lg px-2.5 py-1.5 font-bold outline-none focus:border-blue-600"
                                         />
                                         <div className="flex items-center gap-1">
                                             <input
@@ -4795,8 +4893,8 @@
                                             + 추가
                                         </button>
 
-                                        {/* 🔍 단일 주문 추가 [+ 추가] 버튼 바로 오른쪽에 배치된 방송 내 즉시 검색창 */}
-                                        <div className="flex items-center gap-1.5 w-full sm:w-auto sm:min-w-[260px] max-w-xs ml-auto pl-2 border-l border-slate-200">
+                                        {/* 🔍 PC 화면용: 단일 주문 추가 [+ 추가] 버튼 바로 오른쪽에 배치된 방송 내 즉시 검색창 */}
+                                        <div className="hidden md:flex items-center gap-1.5 w-auto min-w-[260px] max-w-xs ml-auto pl-2 border-l border-slate-200">
                                             <div className="relative flex-1">
                                                 <Icon name="magnifying-glass" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-blue-600" size={13} />
                                                 <input
