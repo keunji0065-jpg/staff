@@ -69,7 +69,7 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 331; // 331 => v3.31
+        const VERSION_STEP = 333; // 333 => v3.33
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.24";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbx_kCIKu48TAyTmxSv0lu_DUk-rPeth_v0dDf9QCDC03cHEX43Zd3inDJ3Q6cFv87Q/exec';
@@ -1723,73 +1723,32 @@
                         }
                     }
 
-                    // 🛡️ 만약 실수로 시트의 이전 방송 블록이 덮어씌워졌더라도, 파이어베이스(_portal_orders)에 백업된 방송 블록들이 있으면 자동으로 복원하여 병합!
-                    if (staffFbDb) {
+                    // 🧹 시트에서 삭제된 방송(예: 테스트로 만든 10/24 라이브 등)이 파이어베이스(_portal_orders)에 남아있다면 되살리지 않고 클라우드에서도 즉시 자동 삭제!
+                    if (staffFbDb && Object.keys(discoveredBlocks).length > 0) {
                         try {
                             const fbOrdersSnap = await staffFbDb.ref('ember_live_data/_portal_orders').once('value');
                             const fbOrdersVal = fbOrdersSnap.val() || {};
                             Object.keys(fbOrdersVal).forEach(safeKey => {
-                                if (safeKey === '__MAIN_LIVE__') return;
-                                const node = fbOrdersVal[safeKey];
-                                if (!node || !node.broadcastName || !Array.isArray(node.customers) || node.customers.length === 0) return;
-                                const cleanB = cleanDisplayTabName(node.broadcastName);
-                                if (!cleanB || ['기본방송', '주문', '주문통합', '메인주문', '오늘의방송'].includes(cleanB)) return;
-                                const tabKey = '주문_' + cleanB;
-                                // 시트에서 못 찾은 방송이 파이어베이스 백업에 남아있다면 즉시 복구!
-                                if (!discoveredBlocks[tabKey]) {
-                                    const restoredGroups = node.customers.map(c => {
-                                        const cardRaw = String(c.isCard || '').trim();
-                                        const cardOnly = cardRaw.replace(/현영완료|현영요청|현영/g, '').replace(/\//g, '').trim();
-                                        let cardMode = 'none';
-                                        if (cardOnly.includes('완료')) cardMode = 'completed';
-                                        else if (cardOnly.startsWith('O') || cardOnly.includes('카드') || c.isCard === true) cardMode = 'requested';
-
-                                        let cashReceiptMode = c.cashReceipt || 'none';
-                                        if (cashReceiptMode === 'none') {
-                                            if (cardRaw.includes('현영완료')) cashReceiptMode = 'completed';
-                                            else if (cardRaw.includes('현영')) cashReceiptMode = 'requested';
-                                        }
-                                        return {
-                                            nick: c.nickname || '',
-                                            realname: c.address?.realname || '',
-                                            phone: fixPhoneNumber(c.address?.phone || ''),
-                                            address: stripZipcode(c.address?.baseAddress || ''),
-                                            memo: c.address?.memo || '',
-                                            shipping: Number(c.shipping ?? 4000) || 0,
-                                            deposit: Number(c.depositTotal) || 0,
-                                            cardMode,
-                                            cashReceiptMode,
-                                            isVip: Boolean(c.isVip),
-                                            isNoShow: Boolean(c.isNoShow),
-                                            isConfirmed: Boolean(c.isConfirmed),
-                                            pin: normalizePin4(c.phoneLast4 || ''),
-                                            trackingNumber: Array.isArray(c.trackingNumbers) && c.trackingNumbers[0] ? String(c.trackingNumbers[0]).trim() : '',
-                                            deposits: Array.isArray(c.deposits) ? c.deposits : [],
-                                            showDeposits: false,
-                                            items: (c.items || []).map((it, idx) => ({
-                                                id: `item_restored_${Date.now()}_${idx}_${Math.random()}`,
-                                                product: it.product || '',
-                                                qty: Number(it.qty) || 1,
-                                                price: Number(it.price) || 0,
-                                                isWaitlist: Boolean(it.isWaitlist),
-                                                waitlistOrder: Number(it.waitlistOrder) || 0
-                                            }))
-                                        };
-                                    }).filter(g => g.nick);
-
-                                    if (restoredGroups.length > 0) {
-                                        discoveredBlocks[tabKey] = {
-                                            broadcastName: cleanB,
-                                            freeShipThreshold: Number(node.customers[0]?.freeShippingThreshold) || 70000,
-                                            defaultShipping: 4000,
-                                            cardFeeRate: Number(node.customers[0]?.cardFeeRate) || 10,
-                                            updatedAt: node.updatedAt || Date.now(),
-                                            groups: restoredGroups
-                                        };
+                                if (safeKey === '__MAIN_LIVE__') {
+                                    if (!isStaffLiveActive) {
+                                        staffFbDb.ref('ember_live_data/_portal_orders/__MAIN_LIVE__').remove().catch(() => {});
                                     }
+                                    return;
+                                }
+                                const node = fbOrdersVal[safeKey];
+                                const cleanB = cleanDisplayTabName(node?.broadcastName || safeKey);
+                                const tabKey = '주문_' + cleanB;
+                                if (!discoveredBlocks[tabKey]) {
+                                    staffFbDb.ref(`ember_live_data/_portal_orders/${safeKey}`).remove().catch(() => {});
                                 }
                             });
-                        } catch (restoreErr) {}
+                            if (!isStaffLiveActive) {
+                                staffFbDb.ref('ember_live_data/_portal_live_mode').set({
+                                    isLive: false,
+                                    updatedAt: Date.now()
+                                }).catch(() => {});
+                            }
+                        } catch (cleanErr) {}
                     }
 
                     // ✨ 고객이 셀프 포털에서 방금 입력한 배송지(_portal_broadcast_addresses)와 주문확정(_portal_confirmed) 내역을 모든 방송 블록에 즉시 병합!
@@ -1848,14 +1807,9 @@
                         } catch (fbErr) {}
                     }
 
-                    // 시트에서 정상적으로 읽어왔다면 옛날 로컬 캐시(중복 방송들)를 버리고 시트 원본으로 100% 덮어씁니다!
+                    // 시트에서 정상적으로 읽어왔다면 옛날 로컬 캐시(시트에서 지운 방송들)를 버리고 시트 원본(discoveredBlocks)으로 100% 일치시킵니다!
                     const hasSheetData = Object.keys(discoveredBlocks).length > 0;
-                    // 🛡️ 기존 로컬 창고(localBroadcastStoreRef.current)에 있는 다른 방송들이 절대 날아가지 않도록 항상 시트 블록과 병합(Merge)합니다!
-                    const lastOrderDirtyTs = Number(localStorage.getItem(STAFF_LOCAL_DIRTY_TIME_KEY) || '0');
-                    const isRecentlyModifiedByStaff = (Date.now() - lastOrderDirtyTs < 25000) && Object.keys(localBroadcastStoreRef.current || {}).length > 0;
-                    const finalBlocksMap = isRecentlyModifiedByStaff
-                        ? { ...discoveredBlocks, ...localBroadcastStoreRef.current }
-                        : (hasSheetData ? { ...localBroadcastStoreRef.current, ...discoveredBlocks } : localBroadcastStore);
+                    const finalBlocksMap = hasSheetData ? discoveredBlocks : localBroadcastStore;
                     setLocalBroadcastStore(finalBlocksMap);
                     localBroadcastStoreRef.current = finalBlocksMap;
                     try {
