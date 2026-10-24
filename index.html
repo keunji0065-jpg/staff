@@ -69,7 +69,7 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 329; // 329 => v3.29
+        const VERSION_STEP = 331; // 331 => v3.31
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.24";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbx_kCIKu48TAyTmxSv0lu_DUk-rPeth_v0dDf9QCDC03cHEX43Zd3inDJ3Q6cFv87Q/exec';
@@ -2115,7 +2115,7 @@
             const loadLiveInventoryFromMaster = useCallback(async () => {
                 try {
                     const rows = await fetchGoogleSheetDirect(activeDictSheetId, '실시간재고');
-                    if (Array.isArray(rows) && rows.length > 0) {
+                    if (Array.isArray(rows)) {
                         const parsed = rows.map((r, i) => ({
                             id: `linv_${i}`,
                             name: String(pickRowField(r, ['name', '상품명'], 0)).trim(),
@@ -2127,36 +2127,86 @@
                 } catch (e) {}
             }, [activeDictSheetId]);
 
+            const handleClearLiveInventory = useCallback(() => {
+                if (liveInventory.length === 0) return showToast('이미 방송 라인업이 비어 있습니다.');
+                openModal(
+                    '현재 등록된 방송 라인업(상품 목록)을 모두 비우시겠습니까?\n(비우는 즉시 구글 시트 실시간재고와 고객용 라인업에서도 모두 지워집니다)',
+                    'confirm',
+                    async () => {
+                        setLiveInventory([]);
+                        if (staffFbDb) {
+                            staffFbDb.ref('ember_live_data').update({
+                                '_global_config/currentPinnedId': null,
+                                '_live_catalog': {
+                                    items: [],
+                                    rawCount: 0,
+                                    explicitClear: true,
+                                    updatedAt: Date.now()
+                                }
+                            }).catch(() => {});
+                        }
+                        try {
+                            await fetchGas(activeGasUrl, {
+                                action: 'save_inventory',
+                                masterId: activeDictSheetId,
+                                forceClear: true,
+                                data: [{ name: '__EMPTY__', price: 0, stock: '', status: '품절', isLocked: false }]
+                            });
+                        } catch (e) {}
+                        showToast('🧹 방송 라인업 상품 목록이 모두 비워졌습니다!');
+                    }
+                );
+            }, [liveInventory.length, openModal, showToast, activeGasUrl, activeDictSheetId]);
+
             useEffect(() => {
                 if (activeMainTab === 'live_order') {
                     loadLiveInventoryFromMaster();
                 }
             }, [activeMainTab, loadLiveInventoryFromMaster]);
 
-            // 유튜브 라이브 영상 주소에서 Chat ID 가져오기 (등록된 모든 API 키 자동 순환 + 정확한 원인 진단)
+            const extractYtId = (url) => {
+                if (!url) return '';
+                const m = String(url).match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|live\/|shorts\/))([\w-]{11})/);
+                return m ? m[1] : String(url).trim();
+            };
+
             const handleConnectYoutubeLive = async (e) => {
                 if (e) e.preventDefault();
-                const rawUrl = liveYoutubeUrl.trim();
-                if (!rawUrl) return openModal('유튜브 라이브 방송 주소(URL)를 입력해 주세요.');
-                const m = rawUrl.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|live\/|shorts\/))([\w-]{11})/);
-                const vid = m ? m[1] : (/^[\w-]{11}$/.test(rawUrl) ? rawUrl : '');
-                if (!vid) return openModal('올바른 유튜브 라이브 주소를 입력해 주세요.');
+                const vid = extractYtId(liveYoutubeUrl);
+                if (!vid || vid.length !== 11) {
+                    return openModal('유효한 유튜브 라이브 영상 주소(URL)를 입력해 주세요.');
+                }
 
-                let rawKeySource = sharedYtApiKey || '';
-                if (!rawKeySource) {
+                // 1) 파이어베이스 + 사장님 로컬스토리지에서 사용 가능한 모든 API 키 수집
+                let rawKeyStr = sharedYtApiKey || '';
+                if (staffFbDb) {
                     try {
-                        const localKey = localStorage.getItem('default_youtubeApiKey');
-                        if (localKey) rawKeySource = JSON.parse(localKey) || '';
+                        const snap = await staffFbDb.ref('ember_live_data/_global_config/sharedYtApiKey').once('value');
+                        if (snap.val()) rawKeyStr = `${rawKeyStr}\n${snap.val()}`;
                     } catch (err) {}
                 }
-                const apiKeys = String(rawKeySource || '').split(/[\n,]+/).map(k => k.trim()).filter(Boolean);
+                try {
+                    const localKey = localStorage.getItem('default_youtubeApiKey');
+                    if (localKey) {
+                        const parsed = JSON.parse(localKey);
+                        if (parsed) rawKeyStr = `${rawKeyStr}\n${parsed}`;
+                    }
+                } catch (err) {}
+
+                const apiKeys = Array.from(new Set(
+                    String(rawKeyStr || '')
+                        .split(/[\n,\s]+/)
+                        .map(k => k.trim())
+                        .filter(k => k.startsWith('AIza'))
+                ));
+
                 if (apiKeys.length === 0) {
                     return openModal(
-                        '유튜브 API 키가 아직 공유되지 않았습니다.\n\n[강은지 주문서]를 한 번 열면 자동으로 공유되거나, 아래 입력창에 유튜브 API 키를 직접 붙여넣어 주세요.',
+                        '유튜브 API 키가 아직 등록되지 않았습니다.\n사장님께 받은 유튜브 API 키(AIza...로 시작)를 아래에 붙여넣어 주세요. (한 번만 입력하면 자동 저장됩니다)',
                         'prompt',
                         (inputKey) => {
-                            if (inputKey && inputKey.trim()) {
-                                const cleanK = inputKey.trim();
+                            const cleanK = String(inputKey || '').trim();
+                            if (cleanK) {
                                 setSharedYtApiKey(cleanK);
                                 if (staffFbDb) {
                                     staffFbDb.ref('ember_live_data/_global_config/sharedYtApiKey').set(cleanK).catch(() => {});
@@ -2300,7 +2350,7 @@
                         const finalPh = fixPhoneNumber(r.phone || matchedFallback?.phone || '');
                         const finalAddr = stripZipcode(r.address || matchedFallback?.address || '');
                         const finalMemo = r.memo || matchedFallback?.memo || '';
-                        const pin4 = normalizePin4(r.pin) || (finalPh.length >= 4 ? cleanPh.slice(-4) : '');
+                        const pin4 = normalizePin4(r.pin) || (finalPh.length >= 4 ? finalPh.slice(-4) : '');
                         const custRows = (rowsToSync || []).filter(x => normalizeString(x.nick) === normN);
                         const repShipRow = custRows.find(x => Number(x.shipping) > 0) || custRows[0] || r;
                         const singleShipFee = r.isVip ? 0 : (Number(repShipRow.shipping ?? liveDefaultShip) || 0);
@@ -6235,17 +6285,27 @@
                                 {/* 3열: 라인업(실시간 재고) 목록 — 클릭시 상품명 복사 & 품절 직접 토글 */}
                                 <div className="w-64 sm:w-72 bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col shrink-0 overflow-hidden">
                                     <div className="p-2.5 bg-slate-100 border-b border-slate-200 space-y-2 shrink-0">
-                                        <div className="flex items-center justify-between">
+                                        <div className="flex items-center justify-between gap-1">
                                             <span className="text-xs font-extrabold text-slate-800">
                                                 🏷️ 방송 라인업 ({liveInventory.length})
                                             </span>
-                                            <button
-                                                type="button"
-                                                onClick={loadLiveInventoryFromMaster}
-                                                className="text-[10px] font-bold text-blue-600 hover:underline"
-                                            >
-                                                ↻ 새로고침
-                                            </button>
+                                            <div className="flex items-center gap-1">
+                                                <button
+                                                    type="button"
+                                                    onClick={loadLiveInventoryFromMaster}
+                                                    className="px-1.5 py-0.5 bg-white hover:bg-blue-50 text-blue-600 border border-blue-200 rounded text-[10px] font-extrabold transition"
+                                                >
+                                                    ↻ 새로고침
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={handleClearLiveInventory}
+                                                    className="px-1.5 py-0.5 bg-red-500 hover:bg-red-600 text-white rounded text-[10px] font-extrabold shadow-sm transition"
+                                                    title="방송 라인업 상품 목록 전체 비우기"
+                                                >
+                                                    비우기
+                                                </button>
+                                            </div>
                                         </div>
                                         <form
                                             onSubmit={e => {
@@ -6284,7 +6344,7 @@
                                     </div>
                                     <div className="flex-1 overflow-y-auto divide-y divide-slate-100 p-1.5">
                                         {liveInventory.map(inv => (
-                                            <div key={inv.id} className="py-1.5 px-2 flex items-center justify-between gap-1.5 hover:bg-slate-50 rounded">
+                                            <div key={inv.id} className="py-1.5 px-2 flex items-center justify-between gap-1.5 hover:bg-slate-50 rounded group">
                                                 <div
                                                     onClick={() => {
                                                         copyToClipboard(inv.name);
@@ -6300,20 +6360,34 @@
                                                         {Number(inv.price).toLocaleString()}원
                                                     </div>
                                                 </div>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        const next = liveInventory.map(x => x.id === inv.id ? { ...x, isSoldOut: !x.isSoldOut } : x);
-                                                        handleSaveLiveInventoryToSheet(next);
-                                                    }}
-                                                    className={`px-2 py-1 rounded text-[10px] font-extrabold shrink-0 transition ${
-                                                        inv.isSoldOut
-                                                            ? 'bg-red-600 text-white'
-                                                            : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
-                                                    }`}
-                                                >
-                                                    품절
-                                                </button>
+                                                <div className="flex items-center gap-1 shrink-0">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            const next = liveInventory.map(x => x.id === inv.id ? { ...x, isSoldOut: !x.isSoldOut } : x);
+                                                            handleSaveLiveInventoryToSheet(next);
+                                                        }}
+                                                        className={`px-2 py-1 rounded text-[10px] font-extrabold shrink-0 transition ${
+                                                            inv.isSoldOut
+                                                                ? 'bg-red-600 text-white'
+                                                                : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                                                        }`}
+                                                    >
+                                                        품절
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            const next = liveInventory.filter(x => x.id !== inv.id);
+                                                            handleSaveLiveInventoryToSheet(next);
+                                                            showToast(`🗑️ '${inv.name}' 상품이 라인업에서 삭제되었습니다.`);
+                                                        }}
+                                                        className="p-1 text-slate-300 hover:text-red-600 rounded transition"
+                                                        title="이 상품 삭제"
+                                                    >
+                                                        <Icon name="trash" weight="bold" size={13} />
+                                                    </button>
+                                                </div>
                                             </div>
                                         ))}
                                     </div>
