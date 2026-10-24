@@ -48,34 +48,36 @@
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
-        // 🛡️ [보안 가드] 무단 소스코드 열람·복제·개발자도구 원천 차단 및 스크립트 태그 자동 소거
+        // 🛡️ 타 업체 및 직원의 무단 소스코드 열람/저장/드래그 방지 가드 (우클릭, F12, Ctrl+Shift+I/J/C/K, Ctrl+U, Ctrl+P)
         if (typeof window !== 'undefined') {
-            const blockEv = (e) => { e.preventDefault(); e.stopPropagation(); return false; };
-            window.addEventListener('contextmenu', blockEv, true);
-            window.addEventListener('dragstart', blockEv, true);
+            window.addEventListener('contextmenu', (e) => {
+                if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+                e.preventDefault();
+            });
+            window.addEventListener('dragstart', (e) => { e.preventDefault(); });
+            window.addEventListener('selectstart', (e) => {
+                const tag = e.target?.tagName;
+                if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
+                e.preventDefault();
+            });
             window.addEventListener('keydown', (e) => {
                 const key = String(e.key || '').toLowerCase();
                 if (
                     e.key === 'F12' ||
-                    (e.ctrlKey && e.shiftKey && (key === 'i' || key === 'j' || key === 'c')) ||
+                    (e.ctrlKey && e.shiftKey && (key === 'i' || key === 'j' || key === 'c' || key === 'k')) ||
                     (e.ctrlKey && (key === 'u' || key === 'p')) ||
-                    (e.metaKey && e.altKey && (key === 'i' || key === 'j' || key === 'u' || key === 'c'))
+                    (e.metaKey && e.altKey && (key === 'i' || key === 'j' || key === 'c' || key === 'u')) ||
+                    (e.metaKey && (key === 'u' || key === 'p'))
                 ) {
-                    return blockEv(e);
+                    e.preventDefault();
+                    e.stopPropagation();
+                    return false;
                 }
             }, true);
-            setInterval(() => {
-                if (window.outerWidth - window.innerWidth > 180 || window.outerHeight - window.innerHeight > 180) {
-                    try { console.clear(); } catch (err) {}
-                }
-            }, 1500);
-            setTimeout(() => {
-                document.querySelectorAll('script[type="text/babel"]').forEach(el => el.remove());
-            }, 800);
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 340; // 340 => v3.40
+        const VERSION_STEP = 341; // 341 => v3.41
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.24";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbx_kCIKu48TAyTmxSv0lu_DUk-rPeth_v0dDf9QCDC03cHEX43Zd3inDJ3Q6cFv87Q/exec';
@@ -85,7 +87,6 @@
         const STAFF_LOCAL_STORE_KEY = 'ember_staff_independent_store_v1';
         const STAFF_LOCAL_DIRTY_TIME_KEY = 'ember_staff_dirty_ts_v1';
         const STAFF_CS_DIRTY_TIME_KEY = 'ember_staff_cs_dirty_ts_v1';
-        const STAFF_PASSCODE_CACHE_KEY = 'ember_staff_verified_pass_v1';
 
         const Icon = ({ name, className = "", weight = "regular", size = 15 }) => (
             <i className={`ph ph-${name} ${className}`} data-phosphor-icon-weight={weight} style={{ fontSize: size }}></i>
@@ -359,14 +360,14 @@
                         dShip: (priceVal !== '' && Number(priceVal) >= 0) ? Number(priceVal) : 4000,
                         cRate: Number(shipVal) > 0 ? Number(shipVal) : 10
                     };
-                    if (curBName !== '오늘의방송' && curBName !== '기본방송') {
+                    if (curBName !== '10/24 라이브' && curBName !== '오늘의방송' && curBName !== '기본방송') {
                         ensureBlock(curBName, curMeta);
                     }
                     return;
                 }
 
                 if (!nick || nick === '닉네임' || nick === '주문자') return;
-                if (curBName === '오늘의방송' || curBName === '기본방송') return;
+                if (curBName === '10/24 라이브' || curBName === '오늘의방송' || curBName === '기본방송') return;
                 if (String(prod || '').includes('222222')) return;
 
                 const blk = ensureBlock(curBName, curMeta);
@@ -1200,6 +1201,8 @@
                     if (saved) {
                         const parsed = JSON.parse(saved);
                         if (parsed && typeof parsed === 'object') {
+                            delete parsed['주문_10/24 라이브'];
+                            delete parsed['10/24 라이브'];
                             return parsed;
                         }
                     }
@@ -1346,8 +1349,7 @@
                 try { localStorage.setItem('ember_staff_live_yt_url_v1', liveYoutubeUrl); } catch (e) {}
             }, [liveYoutubeUrl]);
 
-            const [trackingExcelRef] = [useRef(null)];
-            const currentBroadcastRef = useRef('');
+            const trackingExcelRef = useRef(null);
             const autoSaveOrdersTimerRef = useRef(null);
             const autoSaveCsTimerRef = useRef(null);
             const isOrdersSavingQueueRef = useRef(false);
@@ -1361,10 +1363,6 @@
             useEffect(() => { csGroupsRef.current = csGroups; }, [csGroups]);
             useEffect(() => { customerGroupsRef.current = customerGroups; }, [customerGroups]);
             useEffect(() => { localBroadcastStoreRef.current = localBroadcastStore; }, [localBroadcastStore]);
-
-            useEffect(() => {
-                currentBroadcastRef.current = cleanDisplayTabName(broadcastName || selectedTab || '');
-            }, [broadcastName, selectedTab]);
 
             const showToast = useCallback((msg) => {
                 setToastMsg(msg);
@@ -1964,7 +1962,11 @@
                         }
                     }
 
-                    // 🧹 시트에서 삭제된 방송이 파이어베이스(_portal_orders)에 남아있다면 되살리지 않고 클라우드에서도 즉시 자동 삭제!
+                    // 테스트 더미 방송('10/24 라이브')이나 '222222' 테스트 품목이 캐시에 남아있다면 원천 제거!
+                    delete discoveredBlocks['주문_10/24 라이브'];
+                    delete discoveredBlocks['10/24 라이브'];
+
+                    // 🧹 시트에서 삭제된 방송(예: 테스트로 만든 10/24 라이브 등)이 파이어베이스(_portal_orders)에 남아있다면 되살리지 않고 클라우드에서도 즉시 자동 삭제!
                     if (staffFbDb) {
                         try {
                             const fbOrdersSnap = await staffFbDb.ref('ember_live_data/_portal_orders').once('value');
@@ -2183,45 +2185,6 @@
                         }
                     }
 
-                    // 1-B) 직원이 진행 중인 [🎥 라이브 주문서](liveOrderRows)에도 고객이 포털에서 방금 입력한 배송지를 실시간 반영!
-                    const cleanLiveB = cleanDisplayTabName(liveBroadcastTitle || '');
-                    if (cleanLiveB) {
-                        const safeLiveBKey = cleanLiveB.replace(/[.#$\[\]\/]/g, '_');
-                        const liveBMap = allVal[safeLiveBKey] || allVal['메인주문'] || {};
-                        const liveAddrEntries = Object.values(liveBMap).filter(a => a && a.nickname && (a.address || a.baseAddress));
-                        if (liveAddrEntries.length > 0) {
-                            setLiveOrderRows(prevRows => {
-                                if (!Array.isArray(prevRows) || prevRows.length === 0) return prevRows;
-                                let rowChanged = false;
-                                const nextRows = prevRows.map(r => {
-                                    if (!r.nick) return r;
-                                    const matched = liveAddrEntries.find(a =>
-                                        normalizeString(a.nickname) === normalizeString(r.nick) ||
-                                        (normalizeHandleNick(a.nickname) && normalizeHandleNick(a.nickname) === normalizeHandleNick(r.nick))
-                                    );
-                                    if (!matched) return r;
-                                    const newAddrStr = stripZipcode(matched.address || `${matched.baseAddress || ''} ${matched.detailAddress || ''}`.trim());
-                                    const newReal = matched.realname || r.realname;
-                                    const newPh = fixPhoneNumber(matched.phone || r.phone);
-                                    const newMemo = cleanMemoText(matched.memo ?? r.memo, newAddrStr);
-                                    if (newAddrStr && (r.address !== newAddrStr || r.realname !== newReal || r.phone !== newPh || r.memo !== newMemo)) {
-                                        rowChanged = true;
-                                        return {
-                                            ...r,
-                                            realname: newReal,
-                                            phone: newPh,
-                                            address: newAddrStr,
-                                            memo: newMemo,
-                                            pin: newPh.length >= 4 ? newPh.slice(-4) : r.pin
-                                        };
-                                    }
-                                    return r;
-                                });
-                                return rowChanged ? nextRows : prevRows;
-                            });
-                        }
-                    }
-
                     // 2) 백그라운드의 다른 방송들(localBroadcastStore)도 고객이 입력한 주소로 동시 업데이트하여 저장 시 절대 누락되지 않도록 보호!
                     setLocalBroadcastStore(prevStore => {
                         let storeChanged = false;
@@ -2300,7 +2263,7 @@
                     allAddrRef.off('value', handlePortalAllAddrChange);
                     confRef.off('value', handlePortalConfirmChange);
                 };
-            }, [broadcastName, selectedTab, liveBroadcastTitle]);
+            }, [broadcastName, selectedTab]);
 
             // ✨ 고객이 포털에서 본인의 환불 계좌번호를 직접 입력하거나 수정했을 때 직원용 CS 화면에도 실시간으로 자동 반영!
             useEffect(() => {
@@ -2689,7 +2652,6 @@
                 });
                 staffFbDb.ref('ember_live_data/_portal_live_mode').set({
                     isLive: true,
-                    liveOwner: 'staff',
                     activeBroadcastName: cleanB,
                     updatedAt: Date.now()
                 }).catch(() => {});
@@ -2700,11 +2662,11 @@
                 staffFbDb.ref('ember_live_data/_portal_orders/__MAIN_LIVE__').set({
                     broadcastName: cleanB,
                     updatedAt: Date.now(),
-                    updatedBy: 'staff_live',
+                    updatedBy: 'boss',
                     customers: Object.values(byNick)
                 }).catch(() => {});
 
-                // 생방송 중에는 Firebase(__MAIN_LIVE__)로 고객 포털에 0.01초 만에 즉시 노출하고, 로컬 탭 목록만 부드럽게 갱신 (중복 시트 덮어쓰기 렉 방지!)
+                // 생방송 활성화 상태에서는 입력·변경 시마다 직원용 시트('메인주문')와 고객 포털에도 즉시 자동 저장!
                 const validRows = (rowsToSync || []).filter(r => r.nick && r.product);
                 if (validRows.length > 0 && cleanB && !['오늘의방송', '기본방송'].includes(cleanB)) {
                     const tabKey = '주문_' + cleanB;
@@ -2735,19 +2697,9 @@
                         }))
                     }));
                     setOrderTabs(prev => Array.from(new Set([tabKey, ...prev])));
-                    setLocalBroadcastStore(prev => ({
-                        ...prev,
-                        [tabKey]: {
-                            broadcastName: cleanB,
-                            freeShipThreshold: Number(liveFreeShipThreshold) || 70000,
-                            defaultShipping: Number(liveDefaultShip) || 4000,
-                            cardFeeRate: 10,
-                            updatedAt: Date.now(),
-                            groups: tempGroups
-                        }
-                    }));
+                    saveUpdatedGroupsImmediately(tempGroups, '', cleanB);
                 }
-            }, [liveDefaultShip, liveFreeShipThreshold, getCustomerCreditAmount, findMasterAddressMatch]);
+            }, [liveDefaultShip, liveFreeShipThreshold, getCustomerCreditAmount, saveUpdatedGroupsImmediately, findMasterAddressMatch]);
 
             // 라이브 작성 중인 줄에 아직 주소가 비어있는데 찐고객사전/이전방송 주소록이 로드되면 자동으로 채워넣기!
             useEffect(() => {
@@ -2804,7 +2756,8 @@
                 };
                 const nextRows = [newRow, ...liveOrderRows];
                 setLiveOrderRows(nextRows);
-                syncStaffLiveRowsToPortal(nextRows, liveBroadcastTitle, isStaffLiveActive || nextRows.some(r => r.product));
+                if (!isStaffLiveActive) setIsStaffLiveActive(true);
+                syncStaffLiveRowsToPortal(nextRows, liveBroadcastTitle, true);
                 setTimeout(() => {
                     const el = document.getElementById(`live-prod-${rowId}`);
                     if (el) el.focus();
@@ -2813,176 +2766,103 @@
 
             const updateLiveOrderRow = (rowId, updater) => {
                 setLiveOrderRows(prev => {
-                    const targetRow = prev.find(r => r.id === rowId);
-                    if (!targetRow) return prev;
-                    const updatedTarget = updater(targetRow);
-                    const normNick = normalizeString(updatedTarget.nick);
+                    const target = prev.find(r => r.id === rowId);
+                    const updatedTarget = target ? updater(target) : null;
+                    const targetNormNick = updatedTarget && updatedTarget.nick ? normalizeString(updatedTarget.nick) : '';
 
-                    const next = prev.map(r => {
-                        if (r.id === rowId) return updatedTarget;
-                        if (normNick && normalizeString(r.nick) === normNick) {
-                            return {
-                                ...r,
-                                pin: updatedTarget.pin,
-                                shipping: updatedTarget.shipping,
-                                isShipPaid: updatedTarget.isShipPaid,
-                                realname: updatedTarget.realname,
-                                phone: updatedTarget.phone,
-                                address: updatedTarget.address,
-                                memo: updatedTarget.memo
-                            };
-                        }
-                        return r;
-                    });
+                    let next = prev.map(r => (r.id === rowId ? updatedTarget : r));
+
+                    if (targetNormNick) {
+                        const custProdSum = next
+                            .filter(r => normalizeString(r.nick) === targetNormNick)
+                            .reduce((sum, r) => {
+                                const p = (Number(r.price) || 0) * (Number(r.qty) || 1);
+                                return sum + (p > 0 ? p : 0);
+                            }, 0);
+                        const isJeju = Boolean(updatedTarget.address && String(updatedTarget.address).includes('제주'));
+                        const isFreeShip = Number(liveFreeShipThreshold) > 0 && custProdSum >= Number(liveFreeShipThreshold);
+                        const autoShip = updatedTarget.isVip
+                            ? 0
+                            : (custProdSum > 0 ? ((isFreeShip ? 0 : Number(liveDefaultShip)) + (isJeju ? 3000 : 0)) : Number(liveDefaultShip));
+                        const didManualShipChange = target && Number(target.shipping) !== Number(updatedTarget.shipping);
+                        const finalShip = didManualShipChange ? Number(updatedTarget.shipping) : autoShip;
+
+                        next = next.map(r => {
+                            if (normalizeString(r.nick) === targetNormNick) {
+                                return {
+                                    ...r,
+                                    pin: updatedTarget.pin,
+                                    shipping: finalShip,
+                                    isShipPaid: Boolean(updatedTarget.isShipPaid),
+                                    realname: updatedTarget.realname,
+                                    phone: updatedTarget.phone,
+                                    address: updatedTarget.address,
+                                    memo: updatedTarget.memo
+                                };
+                            }
+                            return r;
+                        });
+                    }
                     syncStaffLiveRowsToPortal(next, liveBroadcastTitle, isStaffLiveActive || next.some(x => x.product));
                     return next;
                 });
             };
 
+            // 라이브 주문표 정렬 토글 핸들러 (닉네임 / 주문상품명 / 입금확인)
             const handleToggleLiveSort = (field) => {
                 setLiveSortConfig(prev => {
-                    if (prev.field !== field) return { field, dir: 'asc' };
-                    if (prev.dir === 'asc') return { field, dir: 'desc' };
-                    return { field: 'time', dir: 'desc' };
+                    if (prev.field !== field) {
+                        return { field, dir: 'asc' };
+                    }
+                    if (prev.dir === 'asc') {
+                        return { field, dir: 'desc' };
+                    }
+                    return { field: 'time', dir: 'desc' }; // 3번째 클릭 시 원래 입력시간순 복귀
                 });
             };
 
             const sortedLiveOrderRows = useMemo(() => {
-                const arr = [...liveOrderRows];
+                const list = [...liveOrderRows];
                 const { field, dir } = liveSortConfig;
-                const mul = dir === 'asc' ? 1 : -1;
+                if (field === 'time') {
+                    return list.sort((a, b) => {
+                        const tA = Number(a.createdAt || String(a.id).replace(/[^0-9]/g, '').slice(0, 13)) || 0;
+                        const tB = Number(b.createdAt || String(b.id).replace(/[^0-9]/g, '').slice(0, 13)) || 0;
+                        return dir === 'asc' ? tA - tB : tB - tA;
+                    });
+                }
                 if (field === 'nick') {
-                    return arr.sort((a, b) => String(a.nick || '').localeCompare(String(b.nick || ''), 'ko', { numeric: true }) * mul);
+                    return list.sort((a, b) => {
+                        const cmp = String(a.nick || '').localeCompare(String(b.nick || ''), 'ko', { numeric: true });
+                        return dir === 'asc' ? cmp : -cmp;
+                    });
                 }
                 if (field === 'product') {
-                    return arr.sort((a, b) => String(a.product || '').localeCompare(String(b.product || ''), 'ko', { numeric: true }) * mul);
+                    return list.sort((a, b) => {
+                        const cmp = String(a.product || '').localeCompare(String(b.product || ''), 'ko', { numeric: true });
+                        return dir === 'asc' ? cmp : -cmp;
+                    });
                 }
                 if (field === 'paid') {
-                    return arr.sort((a, b) => ((a.isPaid ? 1 : 0) - (b.isPaid ? 1 : 0)) * mul);
+                    return list.sort((a, b) => {
+                        const pA = (a.isPaid ? 2 : 0) + (a.isShipPaid ? 1 : 0);
+                        const pB = (b.isPaid ? 2 : 0) + (b.isShipPaid ? 1 : 0);
+                        // asc: 미납(0) 먼저, desc: 완납(3) 먼저
+                        if (pA !== pB) return dir === 'asc' ? pA - pB : pB - pA;
+                        return String(a.nick || '').localeCompare(String(b.nick || ''), 'ko');
+                    });
                 }
-                return arr;
+                return list;
             }, [liveOrderRows, liveSortConfig]);
-
-            // 직원용 라이브에서도 상품을 추가/품절/삭제할 때 라인업(lineup.html) Firebase(_live_catalog)에 0.1초 만에 직통 푸시하는 헬퍼
-            const pushStaffInventoryToLiveCatalog = useCallback((invList) => {
-                if (!staffFbDb || !Array.isArray(invList)) return;
-                try {
-                    const getSafeKey = (name) => String(name || '').replace(/[.#$\[\]]/g, '_');
-                    const validRows = [];
-                    invList.forEach(item => {
-                        const name = String(item.name || '').trim();
-                        if (!name || name === '__EMPTY__') return;
-                        const priceNum = Number(item.price) || 0;
-                        if (priceNum <= 0) return;
-                        validRows.push({
-                            originalName: name,
-                            isSoldOut: Boolean(item.isSoldOut),
-                            numericPrice: priceNum,
-                            formattedPrice: priceNum.toLocaleString(),
-                            sheetVideoCol: ''
-                        });
-                    });
-                    if (validRows.length === 0) {
-                        staffFbDb.ref('ember_live_data/_live_catalog').set({
-                            items: [],
-                            rawCount: 0,
-                            explicitClear: true,
-                            updatedAt: Date.now()
-                        }).catch(() => {});
-                        return;
-                    }
-                    const extractItemGroupKey = (name, price) => {
-                        const trimmed = String(name || '').trim();
-                        const numStart = trimmed.match(/^(\d+(?:-\d+)?)/);
-                        if (numStart) return `${numStart[1]}_${price}`;
-                        const prefixNum = trimmed.match(/^([a-zA-Z]+\s*\d+(?:-\d+)?)/);
-                        if (prefixNum) return `${prefixNum[1].replace(/\s+/g, '').toUpperCase()}_${price}`;
-                        const words = trimmed.split(/\s+/);
-                        const baseKey = words.length >= 2 ? `${words[0]}_${words[1]}` : words[0];
-                        return `${baseKey}_${price}`;
-                    };
-                    const groupMap = {};
-                    validRows.forEach(row => {
-                        const gk = extractItemGroupKey(row.originalName, row.numericPrice);
-                        if (!groupMap[gk]) groupMap[gk] = [];
-                        groupMap[gk].push(row);
-                    });
-                    const finalGroups = [];
-                    Object.values(groupMap).forEach(items => {
-                        if (items.length === 1) {
-                            finalGroups.push({
-                                id: getSafeKey(items[0].originalName),
-                                name: items[0].originalName,
-                                formattedPrice: items[0].formattedPrice,
-                                numericPrice: items[0].numericPrice,
-                                sheetVideoCol: '',
-                                options: [{
-                                    originalName: items[0].originalName,
-                                    displayName: '기본(단품)',
-                                    isSoldOut: items[0].isSoldOut,
-                                    numericPrice: items[0].numericPrice
-                                }]
-                            });
-                            return;
-                        }
-                        const splitItems = items.map(item => item.originalName.split(/\s+/));
-                        const minLen = Math.min(...splitItems.map(arr => arr.length));
-                        let commonWordCount = 0;
-                        for (let i = 0; i < minLen; i++) {
-                            const word = splitItems[0][i];
-                            if (splitItems.every(arr => arr[i] === word)) commonWordCount++;
-                            else break;
-                        }
-                        const commonPrefixStr = splitItems[0].slice(0, commonWordCount).join(' ').trim();
-                        if (commonWordCount === 0 || /^[a-zA-Z]$/.test(commonPrefixStr)) {
-                            items.forEach(singleItem => {
-                                finalGroups.push({
-                                    id: getSafeKey(singleItem.originalName),
-                                    name: singleItem.originalName,
-                                    formattedPrice: singleItem.formattedPrice,
-                                    numericPrice: singleItem.numericPrice,
-                                    sheetVideoCol: '',
-                                    options: [{
-                                        originalName: singleItem.originalName,
-                                        displayName: '기본(단품)',
-                                        isSoldOut: singleItem.isSoldOut,
-                                        numericPrice: singleItem.numericPrice
-                                    }]
-                                });
-                            });
-                            return;
-                        }
-                        finalGroups.push({
-                            id: getSafeKey(commonPrefixStr),
-                            name: commonPrefixStr,
-                            formattedPrice: items[0].formattedPrice,
-                            numericPrice: items[0].numericPrice,
-                            sheetVideoCol: '',
-                            options: items.map((item, idx) => ({
-                                originalName: item.originalName,
-                                displayName: splitItems[idx].slice(commonWordCount).join(' ') || '기본(단품)',
-                                isSoldOut: item.isSoldOut,
-                                numericPrice: item.numericPrice
-                            }))
-                        });
-                    });
-                    staffFbDb.ref('ember_live_data').update({
-                        '_global_config/catalogClosedLock': false,
-                        '_global_config/isStoreClosed': false,
-                        '_deleted_catalog_ids': null,
-                        '_live_catalog': {
-                            items: finalGroups,
-                            rawCount: validRows.length,
-                            explicitClear: false,
-                            updatedAt: Date.now()
-                        }
-                    }).catch(() => {});
-                } catch (e) {}
-            }, []);
 
             const handleSaveLiveInventoryToSheet = async (nextInv) => {
                 setLiveInventory(nextInv);
-                pushStaffInventoryToLiveCatalog(nextInv);
+                if (staffFbDb && nextInv.length > 0) {
+                    staffFbDb.ref('ember_live_data/_global_config').update({
+                        catalogClosedLock: false,
+                        isStoreClosed: false
+                    }).catch(() => {});
+                }
                 try {
                     await fetchGas(activeGasUrl, {
                         action: 'save_inventory',
@@ -3010,7 +2890,12 @@
                         nextInv = prev.map((item, idx) => idx === existIdx ? { ...item, price: unitPrice } : item);
                     }
                     if (nextInv) {
-                        pushStaffInventoryToLiveCatalog(nextInv);
+                        if (staffFbDb) {
+                            staffFbDb.ref('ember_live_data/_global_config').update({
+                                catalogClosedLock: false,
+                                isStoreClosed: false
+                            }).catch(() => {});
+                        }
                         fetchGas(activeGasUrl, {
                             action: 'save_inventory',
                             masterId: activeDictSheetId,
@@ -3021,7 +2906,7 @@
                     }
                     return prev;
                 });
-            }, [activeGasUrl, activeDictSheetId, pushStaffInventoryToLiveCatalog]);
+            }, [activeGasUrl, activeDictSheetId]);
 
             // 라이브 작성 중 마감하지 않고도 현재까지 받은 주문을 직원용 시트('메인주문')와 로컬 방송 목록에 안전하게 중간 저장하는 함수!
             const buildGroupsFromLiveRows = useCallback((validRows) => {
