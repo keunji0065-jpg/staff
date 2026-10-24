@@ -49,7 +49,7 @@
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 308; // 308 => v3.08
+        const VERSION_STEP = 309; // 309 => v3.09
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.24";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzrMczblUPLxqGESdkZks8osdL-CihDenW94Ae3ODL8u_QhVAZGKrsVI_KchtHjCTFg/exec';
@@ -3198,6 +3198,161 @@
                                 )}
                             </div>
 
+                            {/* 📌 스크롤을 내려도 절대 움직이지 않고 상단에 고정되는 대시보드 & 컨트롤 영역 */}
+                            {activeMainTab === 'orders' && (
+                                <div className="px-3 sm:px-4 pt-2.5 pb-2 bg-slate-100 border-b border-slate-200/80 space-y-2 shrink-0 z-20 shadow-sm">
+                                    <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-2">
+                                        {[
+                                            { id: 'all', label: '전체 주문현황', val: `${stats.totalCustomers}명 (${stats.totalQty}개)`, color: 'text-slate-900' },
+                                            { id: 'paid', label: '완납', val: `${stats.paidCount}명`, color: 'text-emerald-600' },
+                                            { id: 'unpaid', label: '미수금', val: `${stats.unpaidCount}명`, color: 'text-red-600' },
+                                            { id: 'card_req', label: '💳 카드요청', val: `${stats.cardReqCount}명`, color: 'text-amber-600' },
+                                            { id: 'card_comp', label: '✅ 카드완료', val: `${stats.cardCompCount}명`, color: 'text-purple-600' },
+                                            { id: 'cash_req', label: '🧾 현영요청', val: `${stats.cashReqCount}명`, color: 'text-indigo-600' },
+                                            { id: 'cash_comp', label: '🧾 현영완료', val: `${stats.cashCompCount}명`, color: 'text-teal-600' },
+                                            { id: 'no_addr', label: '주소미입력', val: `${stats.noAddrCount}명`, color: 'text-orange-600' },
+                                            { id: 'waitlist', label: '⏱️ 품절대기', val: `${stats.waitCount}명`, color: 'text-amber-800' }
+                                        ].map(card => (
+                                            <div
+                                                key={card.id}
+                                                onClick={() => setStatusFilter(card.id)}
+                                                className={`bg-white px-2.5 py-2 rounded-xl border-2 cursor-pointer transition flex flex-col items-center justify-center text-center shadow-sm ${
+                                                    statusFilter === card.id ? 'border-blue-600 ring-2 ring-blue-600/10' : 'border-slate-200 hover:border-slate-300'
+                                                }`}
+                                            >
+                                                <span className="text-[11px] font-bold text-slate-500 whitespace-nowrap mb-0.5">{card.label}</span>
+                                                <span className={`text-sm font-black whitespace-nowrap ${card.color}`}>{card.val}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    <form onSubmit={handleSingleAddOrder} className="bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center gap-2 text-xs relative">
+                                        <span className="font-extrabold text-slate-700 flex items-center gap-1 shrink-0">
+                                            <Icon name="plus-circle" weight="fill" className="text-blue-600" /> 단일 주문 추가:
+                                        </span>
+                                        <div className="relative">
+                                            <input
+                                                type="text"
+                                                value={newNick}
+                                                onFocus={() => setShowNewNickSuggest(true)}
+                                                onBlur={() => setTimeout(() => setShowNewNickSuggest(false), 180)}
+                                                onChange={e => { setNewNick(e.target.value); setShowNewNickSuggest(true); }}
+                                                placeholder="닉네임 (찐고객사전 자동연동)"
+                                                className="w-44 border border-slate-300 rounded-lg px-2.5 py-1.5 font-bold outline-none focus:border-blue-600"
+                                            />
+                                            {showNewNickSuggest && newNickSuggestions.length > 0 && (
+                                                <div className="absolute left-0 top-full mt-1 w-72 bg-white border border-slate-300 rounded-xl shadow-xl z-50 overflow-hidden divide-y divide-slate-100">
+                                                    <div className="px-2.5 py-1 bg-emerald-50 text-[10px] font-extrabold text-emerald-700">
+                                                        📗 찐고객사전 주소록 일치 고객 (클릭시 선택)
+                                                    </div>
+                                                    {newNickSuggestions.map((item, idx) => (
+                                                        <button
+                                                            key={idx}
+                                                            type="button"
+                                                            onMouseDown={() => {
+                                                                setNewNick(item.nickname);
+                                                                setShowNewNickSuggest(false);
+                                                            }}
+                                                            className="w-full text-left px-2.5 py-1.5 hover:bg-blue-50 flex flex-col gap-0.5 text-xs"
+                                                        >
+                                                            <span className="font-extrabold text-slate-800">
+                                                                {item.nickname} <span className="text-emerald-700">({item.realname} · {item.phone})</span>
+                                                            </span>
+                                                            <span className="text-[10px] text-slate-500 truncate">{item.address}</span>
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <input
+                                            type="text"
+                                            value={newProd}
+                                            onChange={e => setNewProd(e.target.value)}
+                                            placeholder="상품명 입력 (적립금 차감시 '적립금' 입력)"
+                                            className="flex-1 min-w-[180px] border border-slate-300 rounded-lg px-2.5 py-1.5 font-bold outline-none focus:border-blue-600"
+                                        />
+                                        <div className="flex items-center gap-1">
+                                            <input
+                                                type="number"
+                                                value={newQty}
+                                                onChange={e => setNewQty(e.target.value)}
+                                                className="w-14 border border-slate-300 rounded-lg px-2 py-1.5 text-right font-bold outline-none focus:border-blue-600"
+                                            />
+                                            <span className="text-slate-500 font-bold">개</span>
+                                        </div>
+                                        <div className="flex items-center gap-1">
+                                            <input
+                                                type="text"
+                                                value={newPrice}
+                                                onChange={e => {
+                                                    const v = e.target.value.replace(/,/g, '');
+                                                    if (v === '' || v === '-' || !isNaN(v)) setNewPrice((v && v !== '-') ? Number(v).toLocaleString() : v);
+                                                }}
+                                                placeholder="단가(원)"
+                                                className="w-28 border border-slate-300 rounded-lg px-2.5 py-1.5 text-right font-bold outline-none focus:border-blue-600"
+                                            />
+                                            <span className="text-slate-500 font-bold">원</span>
+                                        </div>
+                                        <button type="submit" className="px-4 py-1.5 bg-slate-800 hover:bg-slate-900 text-white font-extrabold rounded-lg shadow-sm">
+                                            + 추가
+                                        </button>
+                                    </form>
+                                </div>
+                            )}
+
+                            {activeMainTab === 'cs' && (
+                                <div className="px-3 sm:px-4 pt-2.5 pb-2 bg-slate-100 border-b border-slate-200/80 shrink-0 z-20 shadow-sm">
+                                    <div className="bg-white px-3.5 py-2.5 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-2 text-xs">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                            <span className="font-extrabold text-slate-700 flex items-center gap-1.5 mr-1">
+                                                <Icon name="arrows-left-right" weight="bold" className="text-blue-600" size={16} />
+                                                <span>누적 미송/교환/반품 목록</span>
+                                            </span>
+                                            <div className="flex bg-slate-100 rounded-lg p-0.5 border border-slate-200 flex-wrap">
+                                                {[
+                                                    { id: 'all', label: `전체 (${csGroups.length})` },
+                                                    { id: 'active', label: `미처리 전체 (${csGroups.filter(c => c.csStatus !== '처리완료').length})` },
+                                                    { id: 'misong', label: `📦 미송대기 (${csGroups.filter(c => c.csStatus !== '처리완료' && (c.items || []).some(it => it.csTag === '미송')).length})` },
+                                                    { id: 'exret', label: `🔄 교환/반품 (${csGroups.filter(c => c.csStatus !== '처리완료' && (c.items || []).some(it => it.csTag && it.csTag !== '정상' && it.csTag !== '미송')).length})` },
+                                                    { id: 'completed', label: `✅ 처리완료 (${csGroups.filter(c => c.csStatus === '처리완료').length})` }
+                                                ].map(tab => (
+                                                    <button
+                                                        key={tab.id}
+                                                        type="button"
+                                                        onClick={() => setCsStatusFilter(tab.id)}
+                                                        className={`px-3 py-1 rounded-md text-[11px] font-extrabold transition ${
+                                                            csStatusFilter === tab.id
+                                                                ? (tab.id === 'misong' ? 'bg-purple-600 text-white shadow-sm' : 'bg-white text-blue-600 shadow-sm')
+                                                                : 'text-slate-600 hover:text-slate-900'
+                                                        }`}
+                                                    >
+                                                        {tab.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+
+                                        <div className="flex items-center gap-1.5 flex-1 min-w-[240px] max-w-md justify-end">
+                                            <div className="relative flex-1">
+                                                <Icon name="magnifying-glass" className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                                                <input
+                                                    type="text"
+                                                    value={csSearchTerm}
+                                                    onChange={e => setCsSearchTerm(e.target.value)}
+                                                    placeholder="미송/CS 내 닉네임·수령인·원본방송·송장·상품 검색..."
+                                                    className="w-full pl-8 pr-7 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-extrabold text-slate-800 outline-none focus:bg-white focus:border-blue-600"
+                                                />
+                                                {csSearchTerm && (
+                                                    <button onClick={() => setCsSearchTerm('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                                                        <Icon name="x-circle" weight="fill" size={14} />
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
                             <main className="flex-1 overflow-y-auto p-3 sm:p-4 w-full">
                         {globalSearchResults !== null && (
                             <div className="mb-4 bg-indigo-50/90 border-2 border-indigo-300 rounded-xl p-4 shadow-sm w-full">
@@ -3292,103 +3447,6 @@
 
                         {activeMainTab === 'orders' && (
                             <div className="space-y-2.5 w-full">
-                                <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-2">
-                                    {[
-                                        { id: 'all', label: '전체 주문현황', val: `${stats.totalCustomers}명 (${stats.totalQty}개)`, color: 'text-slate-900' },
-                                        { id: 'paid', label: '완납', val: `${stats.paidCount}명`, color: 'text-emerald-600' },
-                                        { id: 'unpaid', label: '미수금', val: `${stats.unpaidCount}명`, color: 'text-red-600' },
-                                        { id: 'card_req', label: '💳 카드요청', val: `${stats.cardReqCount}명`, color: 'text-amber-600' },
-                                        { id: 'card_comp', label: '✅ 카드완료', val: `${stats.cardCompCount}명`, color: 'text-purple-600' },
-                                        { id: 'cash_req', label: '🧾 현영요청', val: `${stats.cashReqCount}명`, color: 'text-indigo-600' },
-                                        { id: 'cash_comp', label: '🧾 현영완료', val: `${stats.cashCompCount}명`, color: 'text-teal-600' },
-                                        { id: 'no_addr', label: '주소미입력', val: `${stats.noAddrCount}명`, color: 'text-orange-600' },
-                                        { id: 'waitlist', label: '⏱️ 품절대기', val: `${stats.waitCount}명`, color: 'text-amber-800' }
-                                    ].map(card => (
-                                        <div
-                                            key={card.id}
-                                            onClick={() => setStatusFilter(card.id)}
-                                            className={`bg-white px-2.5 py-2 rounded-xl border-2 cursor-pointer transition flex flex-col items-center justify-center text-center shadow-sm ${
-                                                statusFilter === card.id ? 'border-blue-600 ring-2 ring-blue-600/10' : 'border-slate-200 hover:border-slate-300'
-                                            }`}
-                                        >
-                                            <span className="text-[11px] font-bold text-slate-500 whitespace-nowrap mb-0.5">{card.label}</span>
-                                            <span className={`text-sm font-black whitespace-nowrap ${card.color}`}>{card.val}</span>
-                                        </div>
-                                    ))}
-                                </div>
-
-                                <form onSubmit={handleSingleAddOrder} className="bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center gap-2 text-xs relative">
-                                    <span className="font-extrabold text-slate-700 flex items-center gap-1 shrink-0">
-                                        <Icon name="plus-circle" weight="fill" className="text-blue-600" /> 단일 주문 추가:
-                                    </span>
-                                    <div className="relative">
-                                        <input
-                                            type="text"
-                                            value={newNick}
-                                            onFocus={() => setShowNewNickSuggest(true)}
-                                            onBlur={() => setTimeout(() => setShowNewNickSuggest(false), 180)}
-                                            onChange={e => { setNewNick(e.target.value); setShowNewNickSuggest(true); }}
-                                            placeholder="닉네임 (찐고객사전 자동연동)"
-                                            className="w-44 border border-slate-300 rounded-lg px-2.5 py-1.5 font-bold outline-none focus:border-blue-600"
-                                        />
-                                        {showNewNickSuggest && newNickSuggestions.length > 0 && (
-                                            <div className="absolute left-0 top-full mt-1 w-72 bg-white border border-slate-300 rounded-xl shadow-xl z-50 overflow-hidden divide-y divide-slate-100">
-                                                <div className="px-2.5 py-1 bg-emerald-50 text-[10px] font-extrabold text-emerald-700">
-                                                    📗 찐고객사전 주소록 일치 고객 (클릭시 선택)
-                                                </div>
-                                                {newNickSuggestions.map((item, idx) => (
-                                                    <button
-                                                        key={idx}
-                                                        type="button"
-                                                        onMouseDown={() => {
-                                                            setNewNick(item.nickname);
-                                                            setShowNewNickSuggest(false);
-                                                        }}
-                                                        className="w-full text-left px-2.5 py-1.5 hover:bg-blue-50 flex flex-col gap-0.5 text-xs"
-                                                    >
-                                                        <span className="font-extrabold text-slate-800">
-                                                            {item.nickname} <span className="text-emerald-700">({item.realname} · {item.phone})</span>
-                                                        </span>
-                                                        <span className="text-[10px] text-slate-500 truncate">{item.address}</span>
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </div>
-                                    <input
-                                        type="text"
-                                        value={newProd}
-                                        onChange={e => setNewProd(e.target.value)}
-                                        placeholder="상품명 입력 (적립금 차감시 '적립금' 입력)"
-                                        className="flex-1 min-w-[180px] border border-slate-300 rounded-lg px-2.5 py-1.5 font-bold outline-none focus:border-blue-600"
-                                    />
-                                    <div className="flex items-center gap-1">
-                                        <input
-                                            type="number"
-                                            value={newQty}
-                                            onChange={e => setNewQty(e.target.value)}
-                                            className="w-14 border border-slate-300 rounded-lg px-2 py-1.5 text-right font-bold outline-none focus:border-blue-600"
-                                        />
-                                        <span className="text-slate-500 font-bold">개</span>
-                                    </div>
-                                    <div className="flex items-center gap-1">
-                                        <input
-                                            type="text"
-                                            value={newPrice}
-                                            onChange={e => {
-                                                const v = e.target.value.replace(/,/g, '');
-                                                if (v === '' || v === '-' || !isNaN(v)) setNewPrice((v && v !== '-') ? Number(v).toLocaleString() : v);
-                                            }}
-                                            placeholder="단가(원)"
-                                            className="w-28 border border-slate-300 rounded-lg px-2.5 py-1.5 text-right font-bold outline-none focus:border-blue-600"
-                                        />
-                                        <span className="text-slate-500 font-bold">원</span>
-                                    </div>
-                                    <button type="submit" className="px-4 py-1.5 bg-slate-800 hover:bg-slate-900 text-white font-extrabold rounded-lg shadow-sm">
-                                        + 추가
-                                    </button>
-                                </form>
-
                                 {isLoading ? (
                                     <div className="text-center py-16 text-sm font-bold text-slate-400">주문 데이터를 불러오는 중입니다...</div>
                                 ) : filteredGroups.length === 0 ? (
@@ -3833,55 +3891,6 @@
 
                         {activeMainTab === 'cs' && (
                             <div className="space-y-2.5 w-full">
-                                <div className="bg-white px-3.5 py-2.5 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-2 text-xs">
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                        <span className="font-extrabold text-slate-700 flex items-center gap-1.5 mr-1">
-                                            <Icon name="arrows-left-right" weight="bold" className="text-blue-600" size={16} />
-                                            <span>누적 미송/교환/반품 목록</span>
-                                        </span>
-                                        <div className="flex bg-slate-100 rounded-lg p-0.5 border border-slate-200 flex-wrap">
-                                            {[
-                                                { id: 'all', label: `전체 (${csGroups.length})` },
-                                                { id: 'active', label: `미처리 전체 (${csGroups.filter(c => c.csStatus !== '처리완료').length})` },
-                                                { id: 'misong', label: `📦 미송대기 (${csGroups.filter(c => c.csStatus !== '처리완료' && (c.items || []).some(it => it.csTag === '미송')).length})` },
-                                                { id: 'exret', label: `🔄 교환/반품 (${csGroups.filter(c => c.csStatus !== '처리완료' && (c.items || []).some(it => it.csTag && it.csTag !== '정상' && it.csTag !== '미송')).length})` },
-                                                { id: 'completed', label: `✅ 처리완료 (${csGroups.filter(c => c.csStatus === '처리완료').length})` }
-                                            ].map(tab => (
-                                                <button
-                                                    key={tab.id}
-                                                    type="button"
-                                                    onClick={() => setCsStatusFilter(tab.id)}
-                                                    className={`px-3 py-1 rounded-md text-[11px] font-extrabold transition ${
-                                                        csStatusFilter === tab.id
-                                                            ? (tab.id === 'misong' ? 'bg-purple-600 text-white shadow-sm' : 'bg-white text-blue-600 shadow-sm')
-                                                            : 'text-slate-600 hover:text-slate-900'
-                                                    }`}
-                                                >
-                                                    {tab.label}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    </div>
-
-                                    <div className="flex items-center gap-1.5 flex-1 min-w-[240px] max-w-md justify-end">
-                                        <div className="relative flex-1">
-                                            <Icon name="magnifying-glass" className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                                            <input
-                                                type="text"
-                                                value={csSearchTerm}
-                                                onChange={e => setCsSearchTerm(e.target.value)}
-                                                placeholder="미송/CS 내 닉네임·수령인·원본방송·송장·상품 검색..."
-                                                className="w-full pl-8 pr-7 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-extrabold text-slate-800 outline-none focus:bg-white focus:border-blue-600"
-                                            />
-                                            {csSearchTerm && (
-                                                <button onClick={() => setCsSearchTerm('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-                                                    <Icon name="x-circle" weight="fill" size={14} />
-                                                </button>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-
                                 {filteredCsGroups.length === 0 ? (
                                     <div className="text-center py-16 bg-white rounded-xl border border-slate-200 text-xs text-slate-400">
                                         접수된 미송/교환/반품 내역이 없습니다.
