@@ -1146,11 +1146,9 @@
             const activeStaffSheetId = DEFAULT_STAFF_SHEET_ID;
             const activeDictSheetId = DEFAULT_MASTER_SHEET_ID; // 찐고객사전(주소록/적립금) 연동용
 
-            // 🔒 직원 접속 비밀번호 상태 (사장님 주문서 설정과 파이어베이스로 실시간 연동, 기본값 '1234')
+            // 🔒 직원 접속 비밀번호 상태 (새로고침할 때마다 무조건 다시 입력하도록 세션 캐시 제거!)
             const [requiredPasscode, setRequiredPasscode] = useState('1234');
-            const [verifiedPasscode, setVerifiedPasscode] = useState(() => {
-                try { return sessionStorage.getItem(STAFF_PASSCODE_CACHE_KEY) || ''; } catch (e) { return ''; }
-            });
+            const [verifiedPasscode, setVerifiedPasscode] = useState('');
             const [passcodeInput, setPasscodeInput] = useState('');
             const [passcodeError, setPasscodeError] = useState('');
 
@@ -1175,7 +1173,6 @@
                 if (cleanIn === requiredPasscode) {
                     setVerifiedPasscode(cleanIn);
                     setPasscodeError('');
-                    try { sessionStorage.setItem(STAFF_PASSCODE_CACHE_KEY, cleanIn); } catch (err) {}
                 } else {
                     setPasscodeError('비밀번호가 일치하지 않습니다. 사장님께 문의해 주세요.');
                 }
@@ -1184,14 +1181,20 @@
             const handleLockScreen = () => {
                 setVerifiedPasscode('');
                 setPasscodeInput('');
-                try { sessionStorage.removeItem(STAFF_PASSCODE_CACHE_KEY); } catch (err) {}
             };
 
             // 로컬 브라우저에 영구 보존되는 방송별 주문서 데이터 창고 (통신 렉 ZERO)
             const [localBroadcastStore, setLocalBroadcastStore] = useState(() => {
                 try {
                     const saved = localStorage.getItem(STAFF_LOCAL_STORE_KEY);
-                    if (saved) return JSON.parse(saved);
+                    if (saved) {
+                        const parsed = JSON.parse(saved);
+                        if (parsed && typeof parsed === 'object') {
+                            delete parsed['주문_10/24 라이브'];
+                            delete parsed['10/24 라이브'];
+                            return parsed;
+                        }
+                    }
                 } catch (e) {}
                 return {};
             });
@@ -1454,19 +1457,19 @@
 
                 setIsLoading(true);
                 try {
-                    // 오직 '메인주문' 단일 통합 시트만 읽어서 모든 방송 블록을 한 번에 갱신!
+                    // 1순위: 캐시 지연이 전혀 없는 실시간 앱스 스크립트(get_orders)로 '메인주문' 시트 원본을 즉시 읽기!
                     let parsedBlocks = {};
-                    const directRows = await fetchGoogleSheetDirect(activeStaffSheetId, '메인주문');
-                    if (Array.isArray(directRows) && directRows.length > 0) {
-                        parsedBlocks = parseRowsIntoBroadcastBlocks(directRows, '메인주문');
+                    const res = await fetchGas(`${activeGasUrl}?action=get_orders&masterId=${activeStaffSheetId}&tabName=${encodeURIComponent('메인주문')}&t=${Date.now()}`, null, 12000);
+                    const fetched = Array.isArray(res?.data) ? res.data : (Array.isArray(res?.orders) ? res.orders : []);
+                    if (fetched.length > 0) {
+                        parsedBlocks = parseRowsIntoBroadcastBlocks(fetched, '메인주문');
                     }
 
-                    // GAS 폴백: 직통 리더 실패 시 GAS(get_orders)로 '메인주문' 시트 읽기!
+                    // 2순위 폴백: GAS 통신 실패 시에만 직통 리더 사용
                     if (Object.keys(parsedBlocks).length === 0) {
-                        const res = await fetchGas(`${activeGasUrl}?action=get_orders&masterId=${activeStaffSheetId}&tabName=${encodeURIComponent('메인주문')}&t=${Date.now()}`, null, 12000);
-                        const fetched = Array.isArray(res?.data) ? res.data : (Array.isArray(res?.orders) ? res.orders : []);
-                        if (fetched.length > 0) {
-                            parsedBlocks = parseRowsIntoBroadcastBlocks(fetched, '메인주문');
+                        const directRows = await fetchGoogleSheetDirect(activeStaffSheetId, '메인주문');
+                        if (Array.isArray(directRows) && directRows.length > 0) {
+                            parsedBlocks = parseRowsIntoBroadcastBlocks(directRows, '메인주문');
                         }
                     }
 
@@ -1604,7 +1607,16 @@
                         const sheetCredits = {};
                         const sheetVips = {};
                         res.customerDb.forEach(c => {
-                            const n = String(c['닉네임'] || '').trim();
+                            const n = String(c['닉네임'] || c.col_0 || '').trim();
+                            // 사장님 시트('고객상태관리' 탭)에 백업된 유튜브 API 키 자동 추출 및 로컬 캐시 저장
+                            if (n === '___SYSTEM_YT_API_KEY___') {
+                                const savedKey = String(c['고객상태'] || c['비밀번호'] || c.col_1 || c.col_2 || '').trim();
+                                if (savedKey) {
+                                    setSharedYtApiKey(savedKey);
+                                    try { localStorage.setItem('default_youtubeApiKey', JSON.stringify(savedKey)); } catch (e) {}
+                                }
+                                return;
+                            }
                             const st = String(c['고객상태'] || '').trim().toLowerCase();
                             const cred = Number(String(c['적립금'] || '0').replace(/[^0-9.-]/g, '')) || 0;
                             if (n && (st === 'vip' || st === 'manager' || st === '관리자')) {
@@ -1711,23 +1723,25 @@
                 try {
                     const discoveredBlocks = {};
 
-                    // 오직 직원 전용 구글 시트의 '메인주문' 탭 1개만 읽어옵니다!
-                    const [directMainRows, gasMainRes] = await Promise.all([
-                        fetchGoogleSheetDirect(activeStaffSheetId, '메인주문'),
-                        fetchGas(`${activeGasUrl}?action=get_orders&masterId=${activeStaffSheetId}&tabName=${encodeURIComponent('메인주문')}&t=${Date.now()}`, null, 12000).catch(() => null)
-                    ]);
+                    // 1순위: 구글 5분 캐시 때문에 시트에서 지운 '10/24 라이브'가 부활하지 않도록, 실시간 앱스 스크립트(get_orders)를 최우선으로 사용!
+                    const gasMainRes = await fetchGas(`${activeGasUrl}?action=get_orders&masterId=${activeStaffSheetId}&tabName=${encodeURIComponent('메인주문')}&t=${Date.now()}`, null, 12000).catch(() => null);
+                    const gasOrderRows = Array.isArray(gasMainRes?.data) ? gasMainRes.data : (Array.isArray(gasMainRes?.orders) ? gasMainRes.orders : []);
 
-                    if (Array.isArray(directMainRows) && directMainRows.length > 0) {
-                        Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(directMainRows, '메인주문'));
+                    if (gasOrderRows.length > 0) {
+                        Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(gasOrderRows, '메인주문'));
                     } else {
-                        const gasOrderRows = Array.isArray(gasMainRes?.data) ? gasMainRes.data : (Array.isArray(gasMainRes?.orders) ? gasMainRes.orders : []);
-                        if (gasOrderRows.length > 0) {
-                            Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(gasOrderRows, '메인주문'));
+                        const directMainRows = await fetchGoogleSheetDirect(activeStaffSheetId, '메인주문');
+                        if (Array.isArray(directMainRows) && directMainRows.length > 0) {
+                            Object.assign(discoveredBlocks, parseRowsIntoBroadcastBlocks(directMainRows, '메인주문'));
                         }
                     }
 
+                    // 테스트 더미 방송('10/24 라이브')이나 '222222' 테스트 품목이 캐시에 남아있다면 원천 제거!
+                    delete discoveredBlocks['주문_10/24 라이브'];
+                    delete discoveredBlocks['10/24 라이브'];
+
                     // 🧹 시트에서 삭제된 방송(예: 테스트로 만든 10/24 라이브 등)이 파이어베이스(_portal_orders)에 남아있다면 되살리지 않고 클라우드에서도 즉시 자동 삭제!
-                    if (staffFbDb && Object.keys(discoveredBlocks).length > 0) {
+                    if (staffFbDb) {
                         try {
                             const fbOrdersSnap = await staffFbDb.ref('ember_live_data/_portal_orders').once('value');
                             const fbOrdersVal = fbOrdersSnap.val() || {};
@@ -1745,12 +1759,6 @@
                                     staffFbDb.ref(`ember_live_data/_portal_orders/${safeKey}`).remove().catch(() => {});
                                 }
                             });
-                            if (!isStaffLiveActive) {
-                                staffFbDb.ref('ember_live_data/_portal_live_mode').set({
-                                    isLive: false,
-                                    updatedAt: Date.now()
-                                }).catch(() => {});
-                            }
                         } catch (cleanErr) {}
                     }
 
@@ -1811,8 +1819,8 @@
                     }
 
                     // 시트에서 정상적으로 읽어왔다면 옛날 로컬 캐시(시트에서 지운 방송들)를 버리고 시트 원본(discoveredBlocks)으로 100% 일치시킵니다!
-                    const hasSheetData = Object.keys(discoveredBlocks).length > 0;
-                    const finalBlocksMap = hasSheetData ? discoveredBlocks : localBroadcastStore;
+                    const hasSheetData = Array.isArray(gasOrderRows) || Object.keys(discoveredBlocks).length > 0;
+                    const finalBlocksMap = hasSheetData ? discoveredBlocks : {};
                     setLocalBroadcastStore(finalBlocksMap);
                     localBroadcastStoreRef.current = finalBlocksMap;
                     try {
@@ -2131,10 +2139,9 @@
                 if (e) e.preventDefault();
                 const vid = extractYtId(liveYoutubeUrl);
                 if (!vid || vid.length !== 11) {
-                    return openModal('유효한 유튜브 라이브 영상 주소(URL)를 입력해 주세요.');
+                    return openModal('유튜브 라이브 영상 주소(URL)를 정확히 입력해 주세요.');
                 }
-
-                // 1) 파이어베이스 + 사장님 로컬스토리지에서 사용 가능한 모든 API 키 수집
+                // 1) 파이어베이스 + 로컬스토리지 + 사장님 마스터 시트(GAS get_all)에서 사용 가능한 모든 API 키 수집
                 let rawKeyStr = sharedYtApiKey || '';
                 if (staffFbDb) {
                     try {
@@ -2143,37 +2150,66 @@
                     } catch (err) {}
                 }
                 try {
-                    const localKey = localStorage.getItem('default_youtubeApiKey');
-                    if (localKey) {
-                        const parsed = JSON.parse(localKey);
-                        if (parsed) rawKeyStr = `${rawKeyStr}\n${parsed}`;
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        if (k && k.endsWith('youtubeApiKey')) {
+                            const val = localStorage.getItem(k);
+                            if (val) {
+                                try {
+                                    const parsed = JSON.parse(val);
+                                    if (parsed) rawKeyStr = `${rawKeyStr}\n${parsed}`;
+                                } catch (e) {
+                                    rawKeyStr = `${rawKeyStr}\n${val}`;
+                                }
+                            }
+                        }
                     }
                 } catch (err) {}
 
-                const apiKeys = Array.from(new Set(
-                    String(rawKeyStr || '')
-                        .split(/[\n,\s]+/)
-                        .map(k => k.trim())
-                        .filter(k => k.startsWith('AIza'))
-                ));
+                // 만약 아직 키가 없다면 사장님 마스터 시트('고객상태관리' 탭)에서 앱스 스크립트(get_all)로 즉시 조회!
+                if (!rawKeyStr || !rawKeyStr.includes('AIza')) {
+                    try {
+                        const gasRes = await fetchGas(`${activeGasUrl}?action=get_all&masterId=${activeDictSheetId}&skipHeavy=true&t=${Date.now()}`, null, 10000);
+                        if (gasRes && Array.isArray(gasRes.customerDb)) {
+                            const keyRow = gasRes.customerDb.find(c => String(c['닉네임'] || c.col_0 || '').trim() === '___SYSTEM_YT_API_KEY___');
+                            if (keyRow) {
+                                const sheetKey = String(keyRow['고객상태'] || keyRow['비밀번호'] || keyRow.col_1 || keyRow.col_2 || '').trim();
+                                if (sheetKey) {
+                                    rawKeyStr = `${rawKeyStr}\n${sheetKey}`;
+                                    setSharedYtApiKey(sheetKey);
+                                    try { localStorage.setItem('default_youtubeApiKey', JSON.stringify(sheetKey)); } catch (e) {}
+                                }
+                            }
+                        }
+                    } catch (err) {}
+                }
+
+                // 정규식으로 문자열 안에 들어있는 모든 구글 API 키(AIza... 39자리)를 빠짐없이 추출
+                const matchedKeys = String(rawKeyStr || '').match(/AIza[0-9A-Za-z\-_]{35}/g) || [];
+                const apiKeys = Array.from(new Set(matchedKeys));
 
                 if (apiKeys.length === 0) {
-                    return openModal(
-                        '유튜브 API 키가 아직 등록되지 않았습니다.\n사장님께 받은 유튜브 API 키(AIza...로 시작)를 아래에 붙여넣어 주세요. (한 번만 입력하면 자동 저장됩니다)',
-                        'prompt',
-                        (inputKey) => {
-                            const cleanK = String(inputKey || '').trim();
-                            if (cleanK) {
-                                setSharedYtApiKey(cleanK);
-                                if (staffFbDb) {
-                                    staffFbDb.ref('ember_live_data/_global_config/sharedYtApiKey').set(cleanK).catch(() => {});
-                                }
-                                showToast('🔑 API 키가 등록되었습니다! 다시 [연결]을 눌러주세요.');
-                            }
-                        },
-                        '',
-                        '유튜브 API 키 입력'
-                    );
+                    return openModal('유튜브 API 키를 불러오지 못했습니다.\n우측 [강은지 주문서]를 한 번 열어두시거나, 아래 입력창에 유튜브 API 키(AIza...)를 붙여넣어 주세요.', 'prompt', (inputKey) => {
+                        if (inputKey && inputKey.includes('AIza')) {
+                            const cleanK = inputKey.trim();
+                            setSharedYtApiKey(cleanK);
+                            try { localStorage.setItem('default_youtubeApiKey', JSON.stringify(cleanK)); } catch (e) {}
+                            if (staffFbDb) staffFbDb.ref('ember_live_data/_global_config/sharedYtApiKey').set(cleanK).catch(() => {});
+                            fetchGas(activeGasUrl, {
+                                action: 'save_customer_management',
+                                masterId: activeDictSheetId,
+                                data: { nickname: '___SYSTEM_YT_API_KEY___', type: cleanK }
+                            }).catch(() => {});
+                            showToast('✅ API 키가 저장되었습니다! 다시 [연결] 버튼을 눌러주세요.');
+                        }
+                    }, '', '유튜브 API 키 등록');
+                }
+
+                // 여러 개의 키가 함께 공유될 수 있도록 전체 키 문자열을 상태에 보존
+                const joinedKeys = apiKeys.join('\n');
+                if (joinedKeys !== sharedYtApiKey) {
+                    setSharedYtApiKey(joinedKeys);
+                    try { localStorage.setItem('default_youtubeApiKey', JSON.stringify(joinedKeys)); } catch (e) {}
                 }
 
                 let lastErrorMsg = '';
@@ -2186,9 +2222,9 @@
                         const res = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails,snippet&id=${vid}&key=${curKey}`);
                         const data = await res.json();
 
-                        if (!res.ok) {
+                        if (!res.ok || data?.error) {
                             lastErrorMsg = data?.error?.message || `HTTP ${res.status}`;
-                            continue; // 현재 키가 할당량 초과(403) 등이면 즉시 다음 키로 시도!
+                            continue; // 현재 키가 할당량 초과(403) 또는 키 오류면 즉시 다음 키로 넘어감!
                         }
 
                         if (!data.items || data.items.length === 0) {
@@ -2203,7 +2239,15 @@
                             liveNextPageTokenRef.current = '';
                             setIsLiveChatPaused(false);
                             setLiveChatId(chatId);
-                            showToast(`🟢 유튜브 라이브 채팅이 연결되었습니다! (${videoItem.snippet?.title || '실시간 방송'})`);
+                            setIsStaffLiveActive(true);
+                            if (staffFbDb) {
+                                staffFbDb.ref('ember_live_data/_global_config').update({
+                                    catalogClosedLock: false,
+                                    isStoreClosed: false
+                                }).catch(() => {});
+                            }
+                            syncStaffLiveRowsToPortal(liveOrderRows, liveBroadcastTitle, true);
+                            showToast(`🟢 유튜브 라이브 연결 완료! (${i + 1}번째 API 키 사용중)`);
                             return;
                         } else {
                             videoFoundButNoActiveChat = true;
@@ -2217,32 +2261,43 @@
 
                 if (videoFoundButNoActiveChat) {
                     openModal(
-                        `선택하신 영상${endedStreamTitle ? ` [${endedStreamTitle}]` : ''}은 현재 '실시간 스트리밍 중'이 아니거나 이미 종료된 다시보기 영상입니다.\n\n💡 유튜브 정책상 실시간 채팅 수집은 현재 생방송(LIVE)이 켜져 있는 영상에서만 작동합니다.\n• 만약 지난 방송의 채팅을 넣으시려면 사장님 주문서의 [엑셀 채팅 업로드] 기능을 이용해 주세요.`
+                        `선택하신 영상${endedStreamTitle ? ` [${endedStreamTitle}]` : ''}은 현재 '실시간 스트리밍 중'이 아니거나 이미 종료된 다시보기 영상입니다.\n\n💡 유튜브 정책상 실시간 채팅 수집은 현재 생방송(LIVE)이 켜져 있는 영상에서만 작동합니다.`
                     );
                 } else {
-                    openModal(`유튜브 API 키 호출에 실패했습니다.\n사유: ${lastErrorMsg || '할당량 초과'}\n\n사장님 주문서 설정에 여유 API 키를 추가로 등록해 주세요.`);
+                    openModal(`등록된 유튜브 API 키(${apiKeys.length}개)가 모두 일일 할당량을 초과했거나 호출에 실패했습니다.\n사유: ${lastErrorMsg || '할당량 초과'}`);
                 }
             };
 
-            // 유튜브 라이브 채팅 폴링 (직원 화면에는 최대 500개만 유지 + 사장님 메인시트 자동 백업 + 일시중지 지원)
+            // 유튜브 라이브 채팅 폴링 (할당량 소진된 키는 즉시 다음 키로 자동 전환!)
             useEffect(() => {
                 if (activeMainTab !== 'live_order' || !liveChatId || !sharedYtApiKey || isLiveChatPaused) return;
                 let timer = null;
                 let cancelled = false;
-                const keys = sharedYtApiKey.split(/[\n,]+/).map(k => k.trim()).filter(Boolean);
+                const keys = Array.from(new Set(String(sharedYtApiKey).match(/AIza[0-9A-Za-z\-_]{35}/g) || []));
+                const deadKeySet = new Set();
                 let keyIdx = 0;
 
                 const pollChat = async () => {
                     if (cancelled || keys.length === 0) return;
-                    const curKey = keys[keyIdx % keys.length];
+                    const aliveKeys = keys.filter(k => !deadKeySet.has(k));
+                    if (aliveKeys.length === 0) return;
+                    const curKey = aliveKeys[keyIdx % aliveKeys.length];
+
                     try {
                         let url = `https://www.googleapis.com/youtube/v3/liveChat/messages?liveChatId=${liveChatId}&part=snippet,authorDetails&maxResults=200&key=${curKey}`;
                         if (liveNextPageTokenRef.current) url += `&pageToken=${liveNextPageTokenRef.current}`;
                         const res = await fetch(url);
                         const data = await res.json();
-                        if (res.status === 403 && keys.length > 1) {
-                            keyIdx++;
-                        } else if (res.ok && Array.isArray(data.items) && data.items.length > 0) {
+                        if (!res.ok || data?.error) {
+                            if (res.status === 403 || res.status === 400 || data?.error?.code === 403) {
+                                deadKeySet.add(curKey);
+                                keyIdx++;
+                                if (!cancelled && keys.filter(k => !deadKeySet.has(k)).length > 0) {
+                                    timer = setTimeout(pollChat, 300); // 막힌 즉시 0.3초 만에 다음 키로 재시도!
+                                    return;
+                                }
+                            }
+                        } else if (Array.isArray(data.items) && data.items.length > 0) {
                             if (data.nextPageToken) liveNextPageTokenRef.current = data.nextPageToken;
                             const incoming = data.items.map(item => ({
                                 id: item.id,
@@ -2255,7 +2310,7 @@
                                 const map = new Map();
                                 [...prev, ...incoming].forEach(c => map.set(c.id, c));
                                 const arr = Array.from(map.values());
-                                return arr.slice(-500); // 최대 500개만 유지하여 버벅임 원천 차단!
+                                return arr.slice(-500);
                             });
                         }
                     } catch (e) {}
@@ -2377,6 +2432,40 @@
                     updatedBy: 'boss',
                     customers: Object.values(byNick)
                 }).catch(() => {});
+
+                // 생방송 활성화 상태에서는 입력·변경 시마다 직원용 시트('메인주문')와 고객 포털에도 즉시 자동 저장!
+                const validRows = (rowsToSync || []).filter(r => r.nick && r.product);
+                if (validRows.length > 0 && cleanB && !['오늘의방송', '기본방송'].includes(cleanB)) {
+                    const tabKey = '주문_' + cleanB;
+                    const tempGroups = Object.values(byNick).map(c => ({
+                        nick: c.nickname,
+                        realname: c.address?.realname || '',
+                        phone: c.address?.phone || '',
+                        address: c.address?.baseAddress || '',
+                        memo: c.address?.memo || '',
+                        shipping: Number(c.shipping) || 0,
+                        deposit: Number(c.depositTotal) || 0,
+                        cardMode: 'none',
+                        cashReceiptMode: 'none',
+                        isVip: Boolean(c.isVip),
+                        isNoShow: false,
+                        isConfirmed: false,
+                        pin: c.phoneLast4 || '',
+                        trackingNumber: '',
+                        deposits: [],
+                        showDeposits: false,
+                        items: (c.items || []).map((it, idx) => ({
+                            id: `item_${Date.now()}_${idx}`,
+                            product: it.product,
+                            qty: it.qty,
+                            price: it.price,
+                            isWaitlist: false,
+                            waitlistOrder: 0
+                        }))
+                    }));
+                    setOrderTabs(prev => Array.from(new Set([tabKey, ...prev])));
+                    saveUpdatedGroupsImmediately(tempGroups, '', cleanB);
+                }
             }, [liveDefaultShip, findMasterAddressMatch]);
 
             // 라이브 작성 중인 줄에 아직 주소가 비어있는데 찐고객사전/이전방송 주소록이 로드되면 자동으로 채워넣기!
@@ -2682,7 +2771,7 @@
                 showToast(`💾 [${cleanDisplayTabName(liveBroadcastTitle)}] 현재 작성 중인 주문(${liveOrderRows.length}줄)이 안전하게 중간저장되었습니다!`);
             };
 
-            // 직원 라이브 방송 마감 및 직원용 주문 조회로 넘기기 (기존 다른 방송 내역 100% 보존 & 클로저 덮어쓰기 버그 완벽 차단!)
+            // 직원 라이브 방송 마감 및 직원용 주문 조회로 넘기기 (현재 상태 그대로 확정 저장 후 종료!)
             const handleFinishStaffLiveBroadcast = () => {
                 const validRows = liveOrderRows.filter(r => r.nick && r.product);
                 if (validRows.length === 0) return openModal('마감할 주문 내역이 없습니다.');
@@ -2704,44 +2793,15 @@
                 }
 
                 const tabKey = '주문_' + cleanB;
-                const existingBlock = localBroadcastStoreRef.current[tabKey];
-                const hasExistingOrders = existingBlock && Array.isArray(existingBlock.groups) && existingBlock.groups.length > 0;
-
-                const confirmMsg = hasExistingOrders
-                    ? `⚠️ 이미 [${cleanB}] 이름의 방송(${existingBlock.groups.length}명)이 존재합니다!\n\n기존 [${cleanB}] 주문 내역을 지우지 않고 그 아래에 이번 주문(${validRows.length}건)을 추가로 합쳐서 마감하시겠습니까?\n(별도의 새 방송으로 분리하려면 [취소]를 누르고 상단 방송명을 다르게 변경해 주세요)`
-                    : `[${cleanB}] 방송 주문(${validRows.length}건)을 최종 마감하고 직원용 시트에 추가 저장하시겠습니까?\n\n• 기존에 저장된 이전 방송 내역들은 그대로 보존되고 새 방송 블록으로 추가됩니다!`;
+                const confirmMsg = `[${cleanB}] 방송 주문(${validRows.length}건)을 현재 상태 그대로 확정하고 마감하시겠습니까?`;
 
                 openModal(confirmMsg, 'confirm', () => {
-                    const builtGroups = buildGroupsFromLiveRows(validRows);
-                    let finalGroupsForThisBroadcast = builtGroups;
-
-                    // 만약 동일 이름의 방송이 이미 있었다면 덮어쓰지 않고 안전하게 병합!
-                    if (hasExistingOrders) {
-                        const mergedMap = new Map();
-                        existingBlock.groups.forEach(g => {
-                            mergedMap.set(normalizeString(g.nick), { ...g, items: [...(g.items || [])] });
-                        });
-                        builtGroups.forEach(ng => {
-                            const k = normalizeString(ng.nick);
-                            if (mergedMap.has(k)) {
-                                const ex = mergedMap.get(k);
-                                mergedMap.set(k, {
-                                    ...ex,
-                                    realname: ex.realname || ng.realname,
-                                    phone: ex.phone || ng.phone,
-                                    address: ex.address || ng.address,
-                                    memo: ex.memo || ng.memo,
-                                    deposit: (Number(ex.deposit) || 0) + (Number(ng.deposit) || 0),
-                                    items: [...(ex.items || []), ...(ng.items || [])]
-                                });
-                            } else {
-                                mergedMap.set(k, ng);
-                            }
-                        });
-                        finalGroupsForThisBroadcast = Array.from(mergedMap.values());
-                    }
+                    const finalGroupsForThisBroadcast = buildGroupsFromLiveRows(validRows);
 
                     setIsStaffLiveActive(false);
+                    setLiveChatId(null);
+                    setIsLiveChatPaused(false);
+                    liveNextPageTokenRef.current = '';
                     syncStaffLiveRowsToPortal([], cleanB, false);
 
                     // ✨ 방송 마감 시 고객용 라인업(live_catalog.html)도 즉시 마감 잠금 처리하고 구글 시트 '실시간재고'를 비워 다음 방송에 섞이지 않게 처리!
@@ -2774,10 +2834,9 @@
                     try { localStorage.removeItem('ember_staff_live_rows_v1'); } catch (e) {}
                     setActiveMainTab('orders');
 
-                    // ⭐ 핵심: 이전 방송(selectedTab)에 덮어씌워지지 않도록 새로 마감하는 방송명(cleanB)을 3번째 인자로 명시적 전달!
                     saveUpdatedGroupsImmediately(
                         finalGroupsForThisBroadcast,
-                        `🎉 [${cleanB}] 방송 마감 완료! (주문서 시트 저장 및 고객용 라인업이 함께 마감되었습니다)`,
+                        `🎉 [${cleanB}] 방송 마감 완료! (현재 상태 그대로 확정 저장되었습니다)`,
                         cleanB
                     );
                 });
