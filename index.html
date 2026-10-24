@@ -1294,6 +1294,12 @@
                     return saved !== null && saved !== '' ? Number(saved) : 4000;
                 } catch (e) { return 4000; }
             });
+            const [liveFreeShipThreshold, setLiveFreeShipThreshold] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('ember_staff_live_free_thresh_v1');
+                    return saved !== null && saved !== '' ? Number(saved) : 70000;
+                } catch (e) { return 70000; }
+            });
             const [liveOrderRows, setLiveOrderRows] = useState(() => {
                 try {
                     const saved = localStorage.getItem('ember_staff_live_rows_v1');
@@ -1326,6 +1332,9 @@
             useEffect(() => {
                 try { localStorage.setItem('ember_staff_live_def_ship_v1', String(liveDefaultShip)); } catch (e) {}
             }, [liveDefaultShip]);
+            useEffect(() => {
+                try { localStorage.setItem('ember_staff_live_free_thresh_v1', String(liveFreeShipThreshold)); } catch (e) {}
+            }, [liveFreeShipThreshold]);
             useEffect(() => {
                 try { localStorage.setItem('ember_staff_live_active_v1', String(isStaffLiveActive)); } catch (e) {}
             }, [isStaffLiveActive]);
@@ -1361,6 +1370,217 @@
             const openModal = useCallback((message, type = 'alert', onConfirm = null, defaultValue = '', title = '확인') => {
                 setModal({ isOpen: true, title, message, type, onConfirm, defaultValue });
             }, []);
+
+            const getCustomerCreditAmount = useCallback((nick) => {
+                if (!nick) return 0;
+                if (customerCredits[nick] !== undefined) return Number(customerCredits[nick]) || 0;
+                const targetNorm = normalizeString(nick);
+                const targetHandle = normalizeHandleNick(nick);
+                for (const k of Object.keys(customerCredits)) {
+                    if (normalizeString(k) === targetNorm || (targetHandle && normalizeHandleNick(k) === targetHandle)) {
+                        return Number(customerCredits[k]) || 0;
+                    }
+                }
+                return 0;
+            }, [customerCredits]);
+
+            const getGroupSummary = useCallback((g) => {
+                const activeItems = (g.items || []).filter(i => !i.isWaitlist);
+                const waitItems = (g.items || []).filter(i => i.isWaitlist);
+                const prodTotal = activeItems.reduce((s, i) => s + (Number(i.price) || 0), 0);
+                const prodForShip = activeItems.reduce((s, i) => s + (Number(i.price) > 0 ? Number(i.price) : 0), 0);
+
+                let ship = 0;
+                if (activeItems.length > 0 && prodForShip > 0 && !g.isVip) {
+                    if (g.shipping !== undefined && g.shipping !== null && g.shipping !== '' && !isNaN(Number(g.shipping))) {
+                        ship = Number(g.shipping);
+                    } else {
+                        const isJeju = Boolean(g.address && g.address.includes('제주'));
+                        const isFreeShip = freeShipThreshold > 0 && prodForShip >= freeShipThreshold;
+                        const baseShip = isFreeShip ? 0 : defaultShipping;
+                        const jejuExtra = isJeju ? 3000 : 0;
+                        ship = baseShip + jejuExtra;
+                    }
+                }
+                const baseGrand = prodTotal + ship;
+                const dep = Number(g.deposit) || 0;
+                const baseBal = baseGrand - dep;
+                const feeRate = Number(cardFeeRate) > 0 ? Number(cardFeeRate) / 100 : 0.1;
+                const cardFee = (g.cardMode !== 'none' && baseBal > 0) ? Math.round(baseBal * feeRate) : 0;
+                const finalGrand = baseGrand + cardFee;
+                const finalBal = baseBal + cardFee;
+                const isPaid = activeItems.length > 0 && baseBal <= 0 && g.cardMode === 'none';
+
+                return { activeItems, waitItems, prodTotal, ship, baseGrand, dep, baseBal, cardFee, finalGrand, finalBal, isPaid };
+            }, [freeShipThreshold, defaultShipping, cardFeeRate]);
+
+            const flushOrdersQueueToSheet = useCallback(async () => {
+                if (isOrdersSavingQueueRef.current) return;
+                isOrdersSavingQueueRef.current = true;
+                try {
+                    while (pendingOrdersRowsRef.current !== null) {
+                        const rowsToPush = pendingOrdersRowsRef.current;
+                        pendingOrdersRowsRef.current = null;
+                        if (rowsToPush.length > 0) {
+                            await fetchGas(activeGasUrl, {
+                                action: 'save_orders',
+                                masterId: activeStaffSheetId,
+                                targetSheetName: '메인주문',
+                                onlyMainOrder: true,
+                                broadcastName: '오늘의방송',
+                                data: rowsToPush
+                            }, 15000);
+                        }
+                    }
+                } catch (e) {} finally {
+                    isOrdersSavingQueueRef.current = false;
+                }
+            }, [activeGasUrl, activeStaffSheetId]);
+
+            const saveUpdatedGroupsImmediately = useCallback((nextGroups, toastMessage, targetBroadcastNameOverride = null) => {
+                const rawTargetName = targetBroadcastNameOverride || broadcastName || selectedTab;
+                const cleanBName = cleanDisplayTabName(rawTargetName);
+                if (!cleanBName || ['기본방송', '주문', '주문통합', '메인주문'].includes(cleanBName)) {
+                    return;
+                }
+                const canonicalTab = '주문_' + cleanBName;
+
+                const prevActiveClean = cleanDisplayTabName(broadcastName || selectedTab);
+                const prevCanonicalTab = prevActiveClean ? ('주문_' + prevActiveClean) : '';
+                const baseStore = { ...localBroadcastStoreRef.current };
+                if (prevCanonicalTab && prevCanonicalTab !== canonicalTab && customerGroupsRef.current && customerGroupsRef.current.length > 0) {
+                    baseStore[prevCanonicalTab] = {
+                        ...(baseStore[prevCanonicalTab] || {}),
+                        broadcastName: prevActiveClean,
+                        freeShipThreshold,
+                        defaultShipping,
+                        cardFeeRate,
+                        updatedAt: Date.now(),
+                        groups: customerGroupsRef.current
+                    };
+                }
+
+                const updatedStore = {
+                    ...baseStore,
+                    [canonicalTab]: {
+                        broadcastName: cleanBName,
+                        freeShipThreshold,
+                        defaultShipping,
+                        cardFeeRate,
+                        updatedAt: Date.now(),
+                        groups: nextGroups
+                    }
+                };
+                localBroadcastStoreRef.current = updatedStore;
+                setLocalBroadcastStore(updatedStore);
+                try {
+                    localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(updatedStore));
+                    localStorage.setItem(STAFF_LOCAL_DIRTY_TIME_KEY, String(Date.now()));
+                } catch (e) {}
+
+                if (staffFbDb && cleanBName) {
+                    syncBroadcastGroupsToFirebase(cleanBName, nextGroups, freeShipThreshold, cardFeeRate, customerCredits, 'staff');
+                }
+                setHasUnsavedChanges(false);
+                if (toastMessage) showToast(toastMessage);
+
+                if (autoSaveOrdersTimerRef.current) clearTimeout(autoSaveOrdersTimerRef.current);
+                autoSaveOrdersTimerRef.current = setTimeout(() => {
+                    const latestStore = localBroadcastStoreRef.current;
+                    const buildRows = (bTitle, fThresh, dShip, cRate, groupsArr) => {
+                        const rows = [{
+                            '닉네임': '___WORKSPACE_META___',
+                            '주문자': '___WORKSPACE_META___',
+                            customer: '___WORKSPACE_META___',
+                            nickname: '___WORKSPACE_META___',
+                            name: '___WORKSPACE_META___',
+                            '상품명': bTitle,
+                            product: bTitle,
+                            '수량': Number(fThresh) || 70000,
+                            quantity: Number(fThresh) || 70000,
+                            qty: Number(fThresh) || 70000,
+                            '단가(제품금액)': Number(dShip) || 4000,
+                            price: Number(dShip) || 4000,
+                            '배송비': Number(cRate) || 10,
+                            shipping: Number(cRate) || 10,
+                            '입금액': 0,
+                            deposit: 0,
+                            '카드결제': '', '수령인명': '', '연락처': '', '주소': '', '요청사항': '',
+                            'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
+                        }];
+                        (groupsArr || []).forEach(g => {
+                            const sum = getGroupSummary(g);
+                            const baseCardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
+                            const cashStr = g.cashReceiptMode === 'completed' ? '현영완료' : (g.cashReceiptMode === 'requested' ? '현영요청' : '');
+                            const cardStr = [baseCardStr, cashStr].filter(Boolean).join(' / ');
+                            const cleanPh = fixPhoneNumber(g.phone);
+                            const pinStr = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
+                            const depJson = Array.isArray(g.deposits) && g.deposits.length > 0 ? JSON.stringify(g.deposits) : '';
+                            const itemsList = (g.items && g.items.length > 0) ? g.items : [{ product: '', qty: 1, price: 0, isWaitlist: false, waitlistOrder: 0 }];
+
+                            itemsList.forEach((it, idx) => {
+                                const waitCell = it.isWaitlist ? `대기${it.waitlistOrder || 1}번` : '';
+                                rows.push({
+                                    '닉네임': g.nick,
+                                    '주문자': g.nick,
+                                    customer: g.nick,
+                                    nickname: g.nick,
+                                    name: g.nick,
+                                    '상품명': it.product || '',
+                                    product: it.product || '',
+                                    '수량': Number(it.qty) || 1,
+                                    quantity: Number(it.qty) || 1,
+                                    qty: Number(it.qty) || 1,
+                                    '단가(제품금액)': Number(it.price) || 0,
+                                    price: Number(it.price) || 0,
+                                    '배송비': sum.ship,
+                                    shipping: sum.ship,
+                                    '입금액': idx === 0 ? sum.dep : 0,
+                                    deposit: idx === 0 ? sum.dep : 0,
+                                    '카드결제': cardStr,
+                                    '수령인명': g.realname || '',
+                                    '연락처': cleanPh ? "'" + cleanPh : '',
+                                    '주소': stripZipcode(g.address || ''),
+                                    '요청사항': cleanMemoText(g.memo, g.address),
+                                    'VIP여부': g.isVip ? 'O' : '',
+                                    '노쇼여부': g.isNoShow ? 'O' : '',
+                                    '대기여부': waitCell,
+                                    '비밀번호': pinStr ? "'" + pinStr : '',
+                                    '주문확인': g.isConfirmed ? 'O' : '',
+                                    '입금내역JSON': idx === 0 ? depJson : '',
+                                    '송장번호': g.trackingNumber ? "'" + String(g.trackingNumber).replace(/^'+/, '') : ''
+                                });
+                            });
+                        });
+                        return rows;
+                    };
+
+                    const allCombinedRows = [];
+                    Object.keys(latestStore)
+                        .filter(k => k.startsWith('주문_') && !['주문_기본방송', '주문_주문', '주문_주문통합', '주문_메인주문'].includes(k))
+                        .sort((a, b) => extractBroadcastDateScore(b) - extractBroadcastDateScore(a))
+                        .forEach(tKey => {
+                            const blk = latestStore[tKey];
+                            if (blk && Array.isArray(blk.groups) && blk.groups.length > 0) {
+                                const bTitle = cleanDisplayTabName(blk.broadcastName || tKey);
+                                allCombinedRows.push(...buildRows(bTitle, blk.freeShipThreshold, blk.defaultShipping, blk.cardFeeRate, blk.groups));
+                            }
+                        });
+
+                    if (allCombinedRows.length > 0) {
+                        allCombinedRows.push({
+                            '닉네임': '___WORKSPACE_META___',
+                            '상품명': '오늘의방송',
+                            '수량': 70000,
+                            '단가(제품금액)': 4000,
+                            '배송비': 10,
+                            '입금액': 0
+                        });
+                        pendingOrdersRowsRef.current = allCombinedRows;
+                        flushOrdersQueueToSheet();
+                    }
+                }, 350);
+            }, [broadcastName, selectedTab, freeShipThreshold, defaultShipping, cardFeeRate, customerCredits, getGroupSummary, flushOrdersQueueToSheet, showToast]);
 
             // ✨ CS 내역(미송/교환/반품)을 절대 유실되지 않는 순차 대기열(Queue)을 통해 직원용 구글 시트('교환반품CS' 탭)와 고객 포털(Firebase)에 즉시 저장하는 전용 함수
             const flushCsQueueToSheet = useCallback(async () => {
@@ -2368,8 +2588,15 @@
                         const finalMemo = r.memo || matchedFallback?.memo || '';
                         const pin4 = normalizePin4(r.pin) || (finalPh.length >= 4 ? finalPh.slice(-4) : '');
                         const custRows = (rowsToSync || []).filter(x => normalizeString(x.nick) === normN);
-                        const repShipRow = custRows.find(x => Number(x.shipping) > 0) || custRows[0] || r;
-                        const singleShipFee = r.isVip ? 0 : (Number(repShipRow.shipping ?? liveDefaultShip) || 0);
+                        const custProdSum = custRows.reduce((s, x) => {
+                            const p = (Number(x.price) || 0) * (Number(x.qty) || 1);
+                            return s + (p > 0 ? p : 0);
+                        }, 0);
+                        const isJeju = Boolean(finalAddr && finalAddr.includes('제주'));
+                        const isFreeShip = Number(liveFreeShipThreshold) > 0 && custProdSum >= Number(liveFreeShipThreshold);
+                        const repShipRow = custRows.find(x => x.shipping !== undefined && x.shipping !== '') || custRows[0] || r;
+                        const autoShip = r.isVip ? 0 : (custProdSum > 0 ? ((isFreeShip ? 0 : Number(liveDefaultShip)) + (isJeju ? 3000 : 0)) : Number(liveDefaultShip));
+                        const singleShipFee = r.isVip ? 0 : (isFreeShip ? (isJeju ? 3000 : 0) : (Number(repShipRow.shipping ?? autoShip) || 0));
                         byNick[normN] = {
                             sheetTabName: '메인주문',
                             nickname: nick,
@@ -2377,7 +2604,7 @@
                             broadcastName: cleanB,
                             isVip: Boolean(r.isVip),
                             credit: getCustomerCreditAmount(nick),
-                            freeShippingThreshold: 70000,
+                            freeShippingThreshold: Number(liveFreeShipThreshold) || 70000,
                             cardFeeRate: 10,
                             isCard: '',
                             cashReceipt: 'none',
@@ -2470,7 +2697,7 @@
                     setOrderTabs(prev => Array.from(new Set([tabKey, ...prev])));
                     saveUpdatedGroupsImmediately(tempGroups, '', cleanB);
                 }
-            }, [liveDefaultShip, findMasterAddressMatch]);
+            }, [liveDefaultShip, liveFreeShipThreshold, getCustomerCreditAmount, saveUpdatedGroupsImmediately, findMasterAddressMatch]);
 
             // 라이브 작성 중인 줄에 아직 주소가 비어있는데 찐고객사전/이전방송 주소록이 로드되면 자동으로 채워넣기!
             useEffect(() => {
@@ -2539,23 +2766,41 @@
                 setLiveOrderRows(prev => {
                     const target = prev.find(r => r.id === rowId);
                     const updatedTarget = target ? updater(target) : null;
-                    const next = prev.map(r => {
-                        if (r.id === rowId) return updatedTarget;
-                        // 동일 고객의 비번/배송비/배송비입금여부/배송지는 함께 동기화
-                        if (updatedTarget && updatedTarget.nick && normalizeString(r.nick) === normalizeString(updatedTarget.nick)) {
-                            return {
-                                ...r,
-                                pin: updatedTarget.pin,
-                                shipping: updatedTarget.shipping,
-                                isShipPaid: Boolean(updatedTarget.isShipPaid),
-                                realname: updatedTarget.realname,
-                                phone: updatedTarget.phone,
-                                address: updatedTarget.address,
-                                memo: updatedTarget.memo
-                            };
-                        }
-                        return r;
-                    });
+                    const targetNormNick = updatedTarget && updatedTarget.nick ? normalizeString(updatedTarget.nick) : '';
+
+                    let next = prev.map(r => (r.id === rowId ? updatedTarget : r));
+
+                    if (targetNormNick) {
+                        const custProdSum = next
+                            .filter(r => normalizeString(r.nick) === targetNormNick)
+                            .reduce((sum, r) => {
+                                const p = (Number(r.price) || 0) * (Number(r.qty) || 1);
+                                return sum + (p > 0 ? p : 0);
+                            }, 0);
+                        const isJeju = Boolean(updatedTarget.address && String(updatedTarget.address).includes('제주'));
+                        const isFreeShip = Number(liveFreeShipThreshold) > 0 && custProdSum >= Number(liveFreeShipThreshold);
+                        const autoShip = updatedTarget.isVip
+                            ? 0
+                            : (custProdSum > 0 ? ((isFreeShip ? 0 : Number(liveDefaultShip)) + (isJeju ? 3000 : 0)) : Number(liveDefaultShip));
+                        const didManualShipChange = target && Number(target.shipping) !== Number(updatedTarget.shipping);
+                        const finalShip = didManualShipChange ? Number(updatedTarget.shipping) : autoShip;
+
+                        next = next.map(r => {
+                            if (normalizeString(r.nick) === targetNormNick) {
+                                return {
+                                    ...r,
+                                    pin: updatedTarget.pin,
+                                    shipping: finalShip,
+                                    isShipPaid: Boolean(updatedTarget.isShipPaid),
+                                    realname: updatedTarget.realname,
+                                    phone: updatedTarget.phone,
+                                    address: updatedTarget.address,
+                                    memo: updatedTarget.memo
+                                };
+                            }
+                            return r;
+                        });
+                    }
                     syncStaffLiveRowsToPortal(next, liveBroadcastTitle, isStaffLiveActive || next.some(x => x.product));
                     return next;
                 });
@@ -2846,19 +3091,6 @@
                 });
             };
 
-            const getCustomerCreditAmount = useCallback((nick) => {
-                if (!nick) return 0;
-                if (customerCredits[nick] !== undefined) return Number(customerCredits[nick]) || 0;
-                const targetNorm = normalizeString(nick);
-                const targetHandle = normalizeHandleNick(nick);
-                for (const k of Object.keys(customerCredits)) {
-                    if (normalizeString(k) === targetNorm || (targetHandle && normalizeHandleNick(k) === targetHandle)) {
-                        return Number(customerCredits[k]) || 0;
-                    }
-                }
-                return 0;
-            }, [customerCredits]);
-
             const handleUpdateCustomerCredit = useCallback((nick, nextCreditAmt, reasonMemo = '직원용 적립금 수정') => {
                 const cleanAmt = Math.max(0, Number(nextCreditAmt) || 0);
                 const prevAmt = getCustomerCreditAmount(nick);
@@ -2969,37 +3201,6 @@
                     setIsSearchingGlobal(false);
                 }
             };
-
-            const getGroupSummary = useCallback((g) => {
-                const activeItems = (g.items || []).filter(i => !i.isWaitlist);
-                const waitItems = (g.items || []).filter(i => i.isWaitlist);
-                const prodTotal = activeItems.reduce((s, i) => s + (Number(i.price) || 0), 0);
-                const prodForShip = activeItems.reduce((s, i) => s + (Number(i.price) > 0 ? Number(i.price) : 0), 0);
-
-                let ship = 0;
-                if (activeItems.length > 0 && prodForShip > 0 && !g.isVip) {
-                    // ✨ 시트 E열(배송비)에 명시적으로 적혀 있는 배송비(4000, 7000, 0 등)를 절대 무시하지 않고 100% 그대로 사용!
-                    if (g.shipping !== undefined && g.shipping !== null && g.shipping !== '' && !isNaN(Number(g.shipping))) {
-                        ship = Number(g.shipping);
-                    } else {
-                        const isJeju = Boolean(g.address && g.address.includes('제주'));
-                        const isFreeShip = freeShipThreshold > 0 && prodForShip >= freeShipThreshold;
-                        const baseShip = isFreeShip ? 0 : defaultShipping;
-                        const jejuExtra = isJeju ? 3000 : 0;
-                        ship = baseShip + jejuExtra;
-                    }
-                }
-                const baseGrand = prodTotal + ship;
-                const dep = Number(g.deposit) || 0;
-                const baseBal = baseGrand - dep;
-                const feeRate = Number(cardFeeRate) > 0 ? Number(cardFeeRate) / 100 : 0.1;
-                const cardFee = (g.cardMode !== 'none' && baseBal > 0) ? Math.round(baseBal * feeRate) : 0;
-                const finalGrand = baseGrand + cardFee;
-                const finalBal = baseBal + cardFee;
-                const isPaid = activeItems.length > 0 && baseBal <= 0 && g.cardMode === 'none';
-
-                return { activeItems, waitItems, prodTotal, ship, baseGrand, dep, baseBal, cardFee, finalGrand, finalBal, isPaid };
-            }, [freeShipThreshold, defaultShipping, cardFeeRate]);
 
             const handleApplyCreditToOrderInStaff = useCallback((nick, availableCredit, currentBalance) => {
                 const avail = Math.max(0, Number(availableCredit) || 0);
@@ -3238,179 +3439,6 @@
                 window.addEventListener('keydown', onKeyDown);
                 return () => window.removeEventListener('keydown', onKeyDown);
             }, [handleSaveAll]);
-
-            // ✨ 주문서 전체 행을 순차 대기열(Queue)을 통해 구글 시트('메인주문' 탭)에 유실 없이 끝까지 저장하는 함수
-            const flushOrdersQueueToSheet = useCallback(async () => {
-                if (isOrdersSavingQueueRef.current) return;
-                isOrdersSavingQueueRef.current = true;
-                try {
-                    while (pendingOrdersRowsRef.current !== null) {
-                        const rowsToPush = pendingOrdersRowsRef.current;
-                        pendingOrdersRowsRef.current = null;
-                        if (rowsToPush.length > 0) {
-                            await fetchGas(activeGasUrl, {
-                                action: 'save_orders',
-                                masterId: activeStaffSheetId,
-                                targetSheetName: '메인주문',
-                                onlyMainOrder: true,
-                                broadcastName: '오늘의방송',
-                                data: rowsToPush
-                            }, 15000);
-                        }
-                    }
-                } catch (e) {} finally {
-                    isOrdersSavingQueueRef.current = false;
-                }
-            }, [activeGasUrl, activeStaffSheetId]);
-
-            // ✨ 송장번호 및 단일 주문 추가/삭제/수정 변경 사항을 대기 시간 0초(Non-blocking)로 시트('메인주문' 탭)와 고객 포털(Firebase)에 즉시 자동 저장하는 헬퍼 함수
-            const saveUpdatedGroupsImmediately = useCallback((nextGroups, toastMessage, targetBroadcastNameOverride = null) => {
-                const rawTargetName = targetBroadcastNameOverride || broadcastName || selectedTab;
-                const cleanBName = cleanDisplayTabName(rawTargetName);
-                if (!cleanBName || ['기본방송', '주문', '주문통합', '메인주문'].includes(cleanBName)) {
-                    return;
-                }
-                const canonicalTab = '주문_' + cleanBName;
-
-                // 현재 화면에 열려 있던 이전 방송(selectedTab)도 최신 상태로 먼저 보존한 뒤, 타겟 방송(canonicalTab)을 업데이트!
-                const prevActiveClean = cleanDisplayTabName(broadcastName || selectedTab);
-                const prevCanonicalTab = prevActiveClean ? ('주문_' + prevActiveClean) : '';
-                const baseStore = { ...localBroadcastStoreRef.current };
-                if (prevCanonicalTab && prevCanonicalTab !== canonicalTab && customerGroupsRef.current && customerGroupsRef.current.length > 0) {
-                    baseStore[prevCanonicalTab] = {
-                        ...(baseStore[prevCanonicalTab] || {}),
-                        broadcastName: prevActiveClean,
-                        freeShipThreshold,
-                        defaultShipping,
-                        cardFeeRate,
-                        updatedAt: Date.now(),
-                        groups: customerGroupsRef.current
-                    };
-                }
-
-                const updatedStore = {
-                    ...baseStore,
-                    [canonicalTab]: {
-                        broadcastName: cleanBName,
-                        freeShipThreshold,
-                        defaultShipping,
-                        cardFeeRate,
-                        updatedAt: Date.now(),
-                        groups: nextGroups
-                    }
-                };
-                localBroadcastStoreRef.current = updatedStore;
-                setLocalBroadcastStore(updatedStore);
-                try {
-                    localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(updatedStore));
-                    localStorage.setItem(STAFF_LOCAL_DIRTY_TIME_KEY, String(Date.now()));
-                } catch (e) {}
-
-                // 1) 고객 포털(Firebase)에 0.01초 만에 즉시 반영 및 완료 토스트 표시! (화면 멈춤 ZERO)
-                if (staffFbDb && cleanBName) {
-                    syncBroadcastGroupsToFirebase(cleanBName, nextGroups, freeShipThreshold, cardFeeRate, customerCredits, 'staff');
-                }
-                setHasUnsavedChanges(false);
-                if (toastMessage) showToast(toastMessage);
-
-                // 2) 직원용 구글 시트('메인주문' 탭)에는 백그라운드 디바운스(0.35초) + 순차 대기열(Queue)로 모든 방송 블록을 빠짐없이 저장!
-                if (autoSaveOrdersTimerRef.current) clearTimeout(autoSaveOrdersTimerRef.current);
-                autoSaveOrdersTimerRef.current = setTimeout(() => {
-                    const latestStore = localBroadcastStoreRef.current;
-                    const buildRows = (bTitle, fThresh, dShip, cRate, groupsArr) => {
-                        const rows = [{
-                            '닉네임': '___WORKSPACE_META___',
-                            '주문자': '___WORKSPACE_META___',
-                            customer: '___WORKSPACE_META___',
-                            nickname: '___WORKSPACE_META___',
-                            name: '___WORKSPACE_META___',
-                            '상품명': bTitle,
-                            product: bTitle,
-                            '수량': Number(fThresh) || 70000,
-                            quantity: Number(fThresh) || 70000,
-                            qty: Number(fThresh) || 70000,
-                            '단가(제품금액)': Number(dShip) || 4000,
-                            price: Number(dShip) || 4000,
-                            '배송비': Number(cRate) || 10,
-                            shipping: Number(cRate) || 10,
-                            '입금액': 0,
-                            deposit: 0,
-                            '카드결제': '', '수령인명': '', '연락처': '', '주소': '', '요청사항': '',
-                            'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
-                        }];
-                        (groupsArr || []).forEach(g => {
-                            const sum = getGroupSummary(g);
-                            const baseCardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
-                            const cashStr = g.cashReceiptMode === 'completed' ? '현영완료' : (g.cashReceiptMode === 'requested' ? '현영요청' : '');
-                            const cardStr = [baseCardStr, cashStr].filter(Boolean).join(' / ');
-                            const cleanPh = fixPhoneNumber(g.phone);
-                            const pinStr = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
-                            const depJson = Array.isArray(g.deposits) && g.deposits.length > 0 ? JSON.stringify(g.deposits) : '';
-                            const itemsList = (g.items && g.items.length > 0) ? g.items : [{ product: '', qty: 1, price: 0, isWaitlist: false, waitlistOrder: 0 }];
-
-                            itemsList.forEach((it, idx) => {
-                                const waitCell = it.isWaitlist ? `대기${it.waitlistOrder || 1}번` : '';
-                                rows.push({
-                                    '닉네임': g.nick,
-                                    '주문자': g.nick,
-                                    customer: g.nick,
-                                    nickname: g.nick,
-                                    name: g.nick,
-                                    '상품명': it.product || '',
-                                    product: it.product || '',
-                                    '수량': Number(it.qty) || 1,
-                                    quantity: Number(it.qty) || 1,
-                                    qty: Number(it.qty) || 1,
-                                    '단가(제품금액)': Number(it.price) || 0,
-                                    price: Number(it.price) || 0,
-                                    '배송비': sum.ship,
-                                    shipping: sum.ship,
-                                    '입금액': idx === 0 ? sum.dep : 0,
-                                    deposit: idx === 0 ? sum.dep : 0,
-                                    '카드결제': cardStr,
-                                    '수령인명': g.realname || '',
-                                    '연락처': cleanPh ? "'" + cleanPh : '',
-                                    '주소': stripZipcode(g.address || ''),
-                                    '요청사항': cleanMemoText(g.memo, g.address),
-                                    'VIP여부': g.isVip ? 'O' : '',
-                                    '노쇼여부': g.isNoShow ? 'O' : '',
-                                    '대기여부': waitCell,
-                                    '비밀번호': pinStr ? "'" + pinStr : '',
-                                    '주문확인': g.isConfirmed ? 'O' : '',
-                                    '입금내역JSON': idx === 0 ? depJson : '',
-                                    '송장번호': g.trackingNumber ? "'" + String(g.trackingNumber).replace(/^'+/, '') : ''
-                                });
-                            });
-                        });
-                        return rows;
-                    };
-
-                    const allCombinedRows = [];
-                    Object.keys(latestStore)
-                        .filter(k => k.startsWith('주문_') && !['주문_기본방송', '주문_주문', '주문_주문통합', '주문_메인주문'].includes(k))
-                        .sort((a, b) => extractBroadcastDateScore(b) - extractBroadcastDateScore(a))
-                        .forEach(tKey => {
-                            const blk = latestStore[tKey];
-                            if (blk && Array.isArray(blk.groups) && blk.groups.length > 0) {
-                                const bTitle = cleanDisplayTabName(blk.broadcastName || tKey);
-                                allCombinedRows.push(...buildRows(bTitle, blk.freeShipThreshold, blk.defaultShipping, blk.cardFeeRate, blk.groups));
-                            }
-                        });
-
-                    if (allCombinedRows.length > 0) {
-                        allCombinedRows.push({
-                            '닉네임': '___WORKSPACE_META___',
-                            '상품명': '오늘의방송',
-                            '수량': 70000,
-                            '단가(제품금액)': 4000,
-                            '배송비': 10,
-                            '입금액': 0
-                        });
-                        pendingOrdersRowsRef.current = allCombinedRows;
-                        flushOrdersQueueToSheet();
-                    }
-                }, 350);
-            }, [broadcastName, selectedTab, freeShipThreshold, defaultShipping, cardFeeRate, customerCredits, getGroupSummary, flushOrdersQueueToSheet, showToast]);
 
             // 주문서 내역(품목명, 수량, 단가, 완납, 카드, 노쇼, 대기 등)을 수정하면 즉시 로컬 스토어를 갱신하고 0.5초 뒤 자동으로 직원용 구글 시트('메인주문')와 고객 포털에 저장!
             const updateCustomerGroup = useCallback((nick, updater) => {
@@ -4574,6 +4602,34 @@
                                                         className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold border ${liveDefaultShip === 4000 ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-slate-500 border-slate-300'}`}
                                                     >
                                                         4,000원
+                                                    </button>
+                                                </div>
+                                                <div className="flex items-center gap-1.5 bg-amber-50 px-3 py-1 rounded-xl border border-amber-200 text-xs font-bold">
+                                                    <span className="text-amber-800 shrink-0">🎁 무배기준:</span>
+                                                    <input
+                                                        type="text"
+                                                        value={liveFreeShipThreshold > 0 ? Number(liveFreeShipThreshold).toLocaleString() : '0'}
+                                                        onChange={e => {
+                                                            const raw = e.target.value.replace(/[^0-9]/g, '');
+                                                            setLiveFreeShipThreshold(raw === '' ? 0 : Number(raw));
+                                                        }}
+                                                        placeholder="70,000"
+                                                        className="w-16 bg-white border border-amber-300 rounded px-1.5 py-0.5 text-right font-extrabold text-amber-900 outline-none focus:border-amber-600"
+                                                    />
+                                                    <span className="text-amber-700">원</span>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setLiveFreeShipThreshold(70000)}
+                                                        className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold border ${liveFreeShipThreshold === 70000 ? 'bg-amber-600 text-white border-amber-700' : 'bg-white text-slate-500 border-slate-300'}`}
+                                                    >
+                                                        7만
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setLiveFreeShipThreshold(0)}
+                                                        className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold border ${liveFreeShipThreshold === 0 ? 'bg-slate-700 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-300'}`}
+                                                    >
+                                                        없음
                                                     </button>
                                                 </div>
                                             </div>
