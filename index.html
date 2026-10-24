@@ -69,7 +69,7 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 333; // 333 => v3.33
+        const VERSION_STEP = 334; // 334 => v3.34
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.24";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbx_kCIKu48TAyTmxSv0lu_DUk-rPeth_v0dDf9QCDC03cHEX43Zd3inDJ3Q6cFv87Q/exec';
@@ -1292,7 +1292,10 @@
                     const saved = localStorage.getItem('ember_staff_live_rows_v1');
                     if (saved) {
                         const parsed = JSON.parse(saved);
-                        if (Array.isArray(parsed)) return parsed;
+                        if (Array.isArray(parsed)) {
+                            // 테스트로 입력했던 '222222' 더미 데이터는 자동 제거
+                            return parsed.filter(r => !String(r?.product || '').includes('222222'));
+                        }
                     }
                 } catch (e) {}
                 return [];
