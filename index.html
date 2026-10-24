@@ -353,11 +353,15 @@
                         dShip: (priceVal !== '' && Number(priceVal) >= 0) ? Number(priceVal) : 4000,
                         cRate: Number(shipVal) > 0 ? Number(shipVal) : 10
                     };
-                    ensureBlock(curBName, curMeta);
+                    if (curBName !== '10/24 라이브' && curBName !== '오늘의방송' && curBName !== '기본방송') {
+                        ensureBlock(curBName, curMeta);
+                    }
                     return;
                 }
 
                 if (!nick || nick === '닉네임' || nick === '주문자') return;
+                if (curBName === '10/24 라이브' || curBName === '오늘의방송' || curBName === '기본방송') return;
+                if (String(prod || '').includes('222222')) return;
 
                 const blk = ensureBlock(curBName, curMeta);
                 const gMap = blk.groupsMap;
@@ -3151,6 +3155,15 @@
                     // 구글 시트 Lock 충돌 방지를 위해 순차적으로 빠르게 저장 (save_orders에 이미 송장번호 R열이 전부 포함되어 있으므로 중복 save_tracking_numbers 제거!)
                     let resOrders = { success: true };
                     if (allCombinedRows.length > 0) {
+                        // Code.gs의 preservedRows(삭제한 방송을 시트 맨 밑에 다시 복원하는 구버전 로직)를 무력화하기 위한 마커 행 추가
+                        allCombinedRows.push({
+                            '닉네임': '___WORKSPACE_META___',
+                            '상품명': '오늘의방송',
+                            '수량': 70000,
+                            '단가(제품금액)': 4000,
+                            '배송비': 10,
+                            '입금액': 0
+                        });
                         resOrders = await fetchGas(activeGasUrl, {
                             action: 'save_orders',
                             masterId: activeStaffSheetId,
@@ -3385,6 +3398,14 @@
                         });
 
                     if (allCombinedRows.length > 0) {
+                        allCombinedRows.push({
+                            '닉네임': '___WORKSPACE_META___',
+                            '상품명': '오늘의방송',
+                            '수량': 70000,
+                            '단가(제품금액)': 4000,
+                            '배송비': 10,
+                            '입금액': 0
+                        });
                         pendingOrdersRowsRef.current = allCombinedRows;
                         flushOrdersQueueToSheet();
                     }
@@ -3630,7 +3651,8 @@
                                                 '주소': stripZipcode(g.address || ''), '요청사항': cleanMemoText(g.memo, g.address),
                                                 'VIP여부': g.isVip ? 'O' : '', '노쇼여부': g.isNoShow ? 'O' : '',
                                                 '대기여부': it.isWaitlist ? `대기${it.waitlistOrder || 1}번` : '',
-                                                '비밀번호': pinStr ? "'" + pinStr : '', '주문확인': g.isConfirmed ? 'O' : '',
+                                                '비밀번호': pinStr ? "'" + pinStr : '',
+                                                '주문확인': g.isConfirmed ? 'O' : '',
                                                 '입금내역JSON': idx === 0 ? depJson : '',
                                                 '송장번호': g.trackingNumber ? "'" + String(g.trackingNumber).replace(/^'+/, '') : ''
                                             });
@@ -3638,7 +3660,16 @@
                                     });
                                 }
                             });
-
+                        if (allCombinedRows.length > 0) {
+                            allCombinedRows.push({
+                                '닉네임': '___WORKSPACE_META___',
+                                '상품명': '오늘의방송',
+                                '수량': 70000,
+                                '단가(제품금액)': 4000,
+                                '배송비': 10,
+                                '입금액': 0
+                            });
+                        }
                         pendingOrdersRowsRef.current = allCombinedRows;
                         flushOrdersQueueToSheet();
                         showToast(`🗑️ [${cleanTarget}] 방송 및 고객 포털 캐시가 완전히 삭제되었습니다!`);
