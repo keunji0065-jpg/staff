@@ -77,7 +77,7 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 346; // 346 => v3.46
+        const VERSION_STEP = 348; // 348 => v3.48
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.27";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbyVKpxs5-zeLVKZ3cBXrma01YbGZUYdubGeeo6m-LoXnoE810HUc1lNJUBnJfz4Kgqg/exec';
@@ -1230,6 +1230,39 @@
             const [csCopyTarget, setCsCopyTarget] = useState(null);
             const [cleanupModalOpen, setCleanupModalOpen] = useState(false);
             const [selectedOldTabs, setSelectedOldTabs] = useState({});
+            const [isNoticeModalOpen, setIsNoticeModalOpen] = useState(false);
+            const [customerNotice, setCustomerNotice] = useState({ enabled: false, title: '📢 엠버언니 공지사항', content: '' });
+
+            useEffect(() => {
+                if (!staffFbDb) return;
+                const ref = staffFbDb.ref('ember_live_data/_global_config/customerNotice');
+                const handler = (snap) => {
+                    const val = snap.val();
+                    if (val && typeof val === 'object') {
+                        setCustomerNotice({
+                            enabled: Boolean(val.enabled),
+                            title: val.title || '📢 엠버언니 공지사항',
+                            content: val.content || ''
+                        });
+                    }
+                };
+                ref.on('value', handler);
+                return () => ref.off('value', handler);
+            }, []);
+
+            const handleSaveCustomerNotice = async (e) => {
+                if (e && e.preventDefault) e.preventDefault();
+                if (!staffFbDb) return;
+                const payload = {
+                    enabled: Boolean(customerNotice.enabled),
+                    title: String(customerNotice.title || '📢 엠버언니 공지사항').trim(),
+                    content: String(customerNotice.content || '').trim(),
+                    updatedAt: Date.now()
+                };
+                await staffFbDb.ref('ember_live_data/_global_config/customerNotice').set(payload);
+                setIsNoticeModalOpen(false);
+                showToast(payload.enabled ? '📢 고객용 공지사항 팝업이 즉시 반영되었습니다!' : '고객용 공지사항 팝업이 숨김(OFF) 처리되었습니다.');
+            };
 
             const [newNick, setNewNick] = useState('');
             const [showNewNickSuggest, setShowNewNickSuggest] = useState(false);
@@ -4080,9 +4113,12 @@
             };
 
             const stats = useMemo(() => {
-                let totalCustomers = 0, totalQty = 0, paidCount = 0, unpaidCount = 0, cardReqCount = 0, cardCompCount = 0, cashReqCount = 0, cashCompCount = 0, noAddrCount = 0, waitCount = 0;
+                let totalCustomers = 0, totalQty = 0, paidCount = 0, unpaidCount = 0, overpaidCount = 0, creditCustCount = 0, cardReqCount = 0, cardCompCount = 0, cashReqCount = 0, cashCompCount = 0, noAddrCount = 0, waitCount = 0;
                 customerGroups.forEach(g => {
                     const sum = getGroupSummary(g);
+                    const custCred = getCustomerCreditAmount(g.nick);
+                    const hasUsedCredit = (g.items || []).some(it => String(it.product || '').trim().includes('적립금') && Number(it.price) < 0);
+                    if (custCred > 0 || hasUsedCredit) creditCustCount++;
                     if (sum.waitItems.length > 0) waitCount++;
                     if (sum.activeItems.length === 0) return;
                     totalCustomers++;
@@ -4092,18 +4128,26 @@
                     else if (g.cashReceiptMode === 'requested') cashReqCount++;
                     if (g.cardMode === 'completed') cardCompCount++;
                     else if (g.cardMode === 'requested') cardReqCount++;
+                    else if (sum.baseBal < 0) {
+                        overpaidCount++;
+                        paidCount++;
+                    }
                     else if (sum.isPaid) paidCount++;
                     else unpaidCount++;
                 });
-                return { totalCustomers, totalQty, paidCount, unpaidCount, cardReqCount, cardCompCount, cashReqCount, cashCompCount, noAddrCount, waitCount };
-            }, [customerGroups, getGroupSummary]);
+                return { totalCustomers, totalQty, paidCount, unpaidCount, overpaidCount, creditCustCount, cardReqCount, cardCompCount, cashReqCount, cashCompCount, noAddrCount, waitCount };
+            }, [customerGroups, getGroupSummary, getCustomerCreditAmount]);
 
             const filteredGroups = useMemo(() => {
                 const kw = normalizeString(localSearchTerm);
                 return customerGroups.filter(g => {
                     const sum = getGroupSummary(g);
+                    const custCred = getCustomerCreditAmount(g.nick);
+                    const hasUsedCredit = (g.items || []).some(it => String(it.product || '').trim().includes('적립금') && Number(it.price) < 0);
                     if (statusFilter === 'paid' && !(sum.isPaid && g.cardMode === 'none')) return false;
                     if (statusFilter === 'unpaid' && !(sum.baseBal > 0 && g.cardMode === 'none' && sum.activeItems.length > 0)) return false;
+                    if (statusFilter === 'overpaid' && !(sum.baseBal < 0 && g.cardMode === 'none')) return false;
+                    if (statusFilter === 'credit' && !(custCred > 0 || hasUsedCredit)) return false;
                     if (statusFilter === 'card_req' && g.cardMode !== 'requested') return false;
                     if (statusFilter === 'card_comp' && g.cardMode !== 'completed') return false;
                     if (statusFilter === 'cash_req' && g.cashReceiptMode !== 'requested') return false;
@@ -4118,17 +4162,16 @@
                     ].join(' '));
                     return hay.includes(kw);
                 });
-            }, [customerGroups, statusFilter, localSearchTerm, getGroupSummary]);
+            }, [customerGroups, statusFilter, localSearchTerm, getGroupSummary, getCustomerCreditAmount]);
 
             const filteredCsGroups = useMemo(() => {
                 const kw = normalizeString(csSearchTerm);
                 return csGroups.filter(c => {
-                    const hasMisong = (c.items || []).some(it => it.csTag === '미송');
-                    const hasExRet = (c.items || []).some(it => it.csTag && it.csTag !== '정상' && it.csTag !== '미송');
-                    if (csStatusFilter === 'active' && c.csStatus === '처리완료') return false;
-                    if (csStatusFilter === 'misong' && (!hasMisong || c.csStatus === '처리완료')) return false;
-                    if (csStatusFilter === 'exret' && (!hasExRet || c.csStatus === '처리완료')) return false;
-                    if (csStatusFilter === 'completed' && c.csStatus !== '처리완료') return false;
+                    const isDone = c.csStatus === '처리완료';
+                    if (csStatusFilter === 'active' && isDone) return false;
+                    if (csStatusFilter === 'completed' && !isDone) return false;
+                    if (csStatusFilter === 'misong' && (isDone || !(c.items || []).some(it => it.csTag === '미송'))) return false;
+                    if (csStatusFilter === 'exret' && (isDone || !(c.items || []).some(it => it.csTag && it.csTag !== '정상' && it.csTag !== '미송'))) return false;
                     if (!kw) return true;
                     const hay = normalizeString([
                         c.sourceBroadcast, c.nick, c.realname, c.phone, c.address, c.origTracking, c.csTracking, c.csMemo, c.refundAccount,
@@ -4269,6 +4312,60 @@
                         onClose={() => setCsCopyTarget(null)}
                         onConfirmCopy={handleConfirmCopyToCs}
                     />
+
+                    {isNoticeModalOpen && (
+                        <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-[9999]" onClick={() => setIsNoticeModalOpen(false)}>
+                            <div className="bg-white rounded-xl shadow-2xl p-5 w-full max-w-md mx-4 border border-slate-200" onClick={e => e.stopPropagation()}>
+                                <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-200">
+                                    <h3 className="text-sm font-extrabold text-slate-800 flex items-center gap-1.5">
+                                        <Icon name="megaphone" weight="fill" className="text-amber-500" size={18} />
+                                        <span>고객용 공지사항 팝업 관리</span>
+                                    </h3>
+                                    <button onClick={() => setIsNoticeModalOpen(false)} className="text-slate-400 hover:text-slate-600"><Icon name="x" weight="bold" size={18}/></button>
+                                </div>
+                                <form onSubmit={handleSaveCustomerNotice} className="space-y-3 text-xs">
+                                    <div className="flex items-center justify-between p-2.5 bg-slate-50 rounded-lg border border-slate-200">
+                                        <span className="font-extrabold text-slate-700">고객 포털 & 라인업 접속 시 팝업 띄우기</span>
+                                        <button
+                                            type="button"
+                                            onClick={() => setCustomerNotice(p => ({ ...p, enabled: !p.enabled }))}
+                                            className={`px-3 py-1 rounded-md font-extrabold transition ${
+                                                customerNotice.enabled
+                                                    ? 'bg-emerald-600 text-white shadow-sm'
+                                                    : 'bg-slate-200 text-slate-600'
+                                            }`}
+                                        >
+                                            {customerNotice.enabled ? '🟢 팝업 켜짐 (ON)' : '⚫ 팝업 꺼짐 (OFF)'}
+                                        </button>
+                                    </div>
+                                    <div>
+                                        <label className="block font-bold text-slate-600 mb-1">공지 제목</label>
+                                        <input
+                                            type="text"
+                                            value={customerNotice.title}
+                                            onChange={e => setCustomerNotice(p => ({ ...p, title: e.target.value }))}
+                                            placeholder="📢 엠버언니 공지사항"
+                                            className="w-full border border-slate-300 rounded-lg px-3 py-2 font-bold outline-none focus:border-blue-600"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block font-bold text-slate-600 mb-1">공지 내용 (줄바꿈 지원)</label>
+                                        <textarea
+                                            value={customerNotice.content}
+                                            onChange={e => setCustomerNotice(p => ({ ...p, content: e.target.value }))}
+                                            placeholder="고객분들께 안내할 배송 일정, 휴무, 이벤트 등의 공지 내용을 입력해 주세요."
+                                            rows={6}
+                                            className="w-full border border-slate-300 rounded-lg px-3 py-2 font-semibold outline-none focus:border-blue-600 resize-y leading-relaxed"
+                                        />
+                                    </div>
+                                    <div className="flex gap-2 pt-1">
+                                        <button type="button" onClick={() => setIsNoticeModalOpen(false)} className="flex-1 py-2.5 bg-slate-100 text-slate-600 font-bold rounded-lg">취소</button>
+                                        <button type="submit" className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-extrabold rounded-lg shadow-sm">저장 및 즉시 반영</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
 
                     {cleanupModalOpen && (
                         <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-[9999]" onClick={() => setCleanupModalOpen(false)}>
@@ -4415,6 +4512,20 @@
                             >
                                 <Icon name="floppy-disk" weight="fill" size={14} />
                                 <span>{isSaving ? '저장중...' : '시트 저장'}</span>
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setIsNoticeModalOpen(true)}
+                                className={`px-2.5 py-1.5 rounded-lg text-xs font-extrabold flex items-center gap-1 border shrink-0 transition ${
+                                    customerNotice.enabled
+                                        ? 'bg-amber-400 text-slate-900 border-amber-500 shadow-sm'
+                                        : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+                                }`}
+                                title="고객용 포털 & 라인업 공지사항 팝업 관리"
+                            >
+                                <Icon name="megaphone" weight="fill" size={14} />
+                                <span className="hidden sm:inline">공지 {customerNotice.enabled ? 'ON' : 'OFF'}</span>
                             </button>
 
                             <button
@@ -4785,11 +4896,13 @@
                             {/* 📌 스크롤을 내려도 절대 움직이지 않고 상단에 고정되는 대시보드 & 컨트롤 영역 */}
                             {activeMainTab === 'orders' && (
                                 <div className="px-2.5 sm:px-4 pt-2 pb-2 bg-slate-100 border-b border-slate-200/80 space-y-2 shrink-0 z-20 shadow-sm">
-                                    <div className="flex md:grid md:grid-cols-5 lg:grid-cols-9 gap-1.5 sm:gap-2 overflow-x-auto pb-0.5 scrollbar-hide">
+                                    <div className="flex md:grid md:grid-cols-6 lg:grid-cols-11 gap-1.5 sm:gap-2 overflow-x-auto pb-0.5 scrollbar-hide">
                                         {[
                                             { id: 'all', label: '전체 주문현황', val: `${stats.totalCustomers}명 (${stats.totalQty}개)`, color: 'text-slate-900' },
                                             { id: 'paid', label: '완납', val: `${stats.paidCount}명`, color: 'text-emerald-600' },
                                             { id: 'unpaid', label: '미수금', val: `${stats.unpaidCount}명`, color: 'text-red-600' },
+                                            { id: 'overpaid', label: '💙 과납', val: `${stats.overpaidCount}명`, color: 'text-blue-600' },
+                                            { id: 'credit', label: '💰 적립금', val: `${stats.creditCustCount}명`, color: 'text-teal-700' },
                                             { id: 'card_req', label: '💳 카드요청', val: `${stats.cardReqCount}명`, color: 'text-amber-600' },
                                             { id: 'card_comp', label: '✅ 카드완료', val: `${stats.cardCompCount}명`, color: 'text-purple-600' },
                                             { id: 'cash_req', label: '🧾 현영요청', val: `${stats.cashReqCount}명`, color: 'text-indigo-600' },
@@ -4800,11 +4913,11 @@
                                             <div
                                                 key={card.id}
                                                 onClick={() => setStatusFilter(card.id)}
-                                                className={`bg-white px-2.5 py-1.5 sm:py-2 rounded-xl border-2 cursor-pointer transition flex flex-col items-center justify-center text-center shadow-sm shrink-0 min-w-[82px] md:min-w-0 ${
+                                                className={`bg-white px-2 py-1.5 sm:py-2 rounded-xl border-2 cursor-pointer transition flex flex-col items-center justify-center text-center shadow-sm shrink-0 min-w-[78px] md:min-w-0 ${
                                                     statusFilter === card.id ? 'border-blue-600 ring-2 ring-blue-600/10' : 'border-slate-200 hover:border-slate-300'
                                                 }`}
                                             >
-                                                <span className="text-[10.5px] sm:text-[11px] font-bold text-slate-500 whitespace-nowrap mb-0.5">{card.label}</span>
+                                                <span className="text-[10px] sm:text-[10.5px] font-bold text-slate-500 whitespace-nowrap mb-0.5">{card.label}</span>
                                                 <span className={`text-xs sm:text-sm font-black whitespace-nowrap ${card.color}`}>{card.val}</span>
                                             </div>
                                         ))}
