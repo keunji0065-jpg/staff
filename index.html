@@ -77,7 +77,7 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 352; // 352 => v3.52
+        const VERSION_STEP = 353; // 353 => v3.53
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.29";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzckcaobzdpOmXyBb2UHIatOk7vDJhs344fyOc7e8RKYZ5WS8JKXrdSQPpWz0jTWN8a/exec';
@@ -2041,12 +2041,14 @@
                     // ✨ 고객이 셀프 포털에서 방금 입력한 배송지(_portal_broadcast_addresses)와 주문확정(_portal_confirmed) 내역을 모든 방송 블록에 즉시 병합!
                     if (staffFbDb && Object.keys(discoveredBlocks).length > 0) {
                         try {
-                            const [bcastAddrSnap, confSnap] = await Promise.all([
+                            const [bcastAddrSnap, confSnap, bcastConfSnap] = await Promise.all([
                                 staffFbDb.ref('ember_live_data/_portal_broadcast_addresses').once('value'),
-                                staffFbDb.ref('ember_live_data/_portal_confirmed').once('value')
+                                staffFbDb.ref('ember_live_data/_portal_confirmed').once('value'),
+                                staffFbDb.ref('ember_live_data/_portal_broadcast_confirmed').once('value')
                             ]);
                             const allBcastAddrs = bcastAddrSnap.val() || {};
                             const allConfMap = confSnap.val() || {};
+                            const allBcastConfMap = bcastConfSnap.val() || {};
                             const confList = Object.values(allConfMap).filter(c => c && c.nickname);
 
                             Object.values(discoveredBlocks).forEach(blk => {
@@ -2054,7 +2056,9 @@
                                 const cleanB = cleanDisplayTabName(blk.broadcastName || '');
                                 const safeBKey = cleanB.replace(/[.#$\[\]\/]/g, '_');
                                 const addrMapForB = allBcastAddrs[safeBKey] || {};
+                                const confMapForB = allBcastConfMap[safeBKey] || {};
                                 const addrEntries = Object.values(addrMapForB).filter(a => a && a.nickname && (a.address || a.baseAddress));
+                                const bcastConfEntries = Object.values(confMapForB).filter(c => c && c.nickname);
 
                                 blk.groups = blk.groups.map(g => {
                                     let updatedG = { ...g };
@@ -2086,13 +2090,14 @@
                                             }
                                         }
                                     }
-                                    if (!updatedG.isConfirmed && confList.length > 0) {
-                                        const isConf = confList.some(c => {
+                                    if (!updatedG.isConfirmed) {
+                                        const isBcastConfirmed = bcastConfEntries.some(c => normalizeString(c.nickname) === normalizeString(g.nick));
+                                        const isGlobalConfirmed = confList.some(c => {
                                             const cBName = cleanDisplayTabName(c.broadcastName || '');
                                             if (cBName && normalizeString(cBName) !== normalizeString(cleanB)) return false;
                                             return normalizeString(c.nickname) === normalizeString(g.nick);
                                         });
-                                        if (isConf) updatedG.isConfirmed = true;
+                                        if (isBcastConfirmed || isGlobalConfirmed) updatedG.isConfirmed = true;
                                     }
                                     return updatedG;
                                 });
