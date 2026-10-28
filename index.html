@@ -77,10 +77,10 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 348; // 348 => v3.48
+        const VERSION_STEP = 352; // 352 => v3.52
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
-        const LAST_MODIFIED_DATE = "2026.10.27";
-        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbyVKpxs5-zeLVKZ3cBXrma01YbGZUYdubGeeo6m-LoXnoE810HUc1lNJUBnJfz4Kgqg/exec';
+        const LAST_MODIFIED_DATE = "2026.10.29";
+        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzckcaobzdpOmXyBb2UHIatOk7vDJhs344fyOc7e8RKYZ5WS8JKXrdSQPpWz0jTWN8a/exec';
         const DEFAULT_STAFF_SHEET_ID = '1sM5bkDqEjD6Kpxu2yoJe2aiMuqpcWLMAIGpY3iL5_x8';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
         const DEFAULT_DEP_SHEET_ID = '14bx2HMd_NID3zQN-Hb0x0At2Qmti7-p1Zfx1ZadNScY';
@@ -1807,6 +1807,28 @@
 
             const loadMasterAddresses = useCallback(async () => {
                 try {
+                    // 1순위: 직통 리더(gviz)로 사장님 마스터 시트의 '찐고객사전' 탭을 0.5초 만에 직접 읽어와 시트 수정/삭제 사항 즉시 반영!
+                    const directRows = await fetchGoogleSheetDirect(activeDictSheetId, '찐고객사전');
+                    const directList = [];
+                    if (Array.isArray(directRows)) {
+                        directRows.forEach(a => {
+                            const nick = String(pickRowField(a, ['닉네임', 'nickname', '주문자', '고객명'], 0)).trim();
+                            const realname = String(pickRowField(a, ['수령인명', 'realname', '수령인', '이름', '성명'], 1)).trim();
+                            const phone = fixPhoneNumber(pickRowField(a, ['연락처', 'phone', '전화번호', '핸드폰번호'], 2));
+                            const address = stripZipcode(pickRowField(a, ['주소', 'address', '배송지'], 3));
+                            const rawMemo = String(pickRowField(a, ['배송메모', 'memo', '요청사항', '메모'], 4)).trim();
+                            const memo = cleanMemoText(/^\d{5}$/.test(rawMemo) ? pickRowField(a, ['col_5'], 5) : rawMemo, address);
+                            if (nick.toLowerCase() === 'nickname' || nick === '닉네임' || realname.toLowerCase() === 'realname') return;
+                            if ((nick || realname) && address) {
+                                directList.push({ nickname: nick || realname, realname, phone, address, memo });
+                            }
+                        });
+                        if (directList.length > 0) {
+                            setMasterAddresses(directList);
+                            try { localStorage.setItem('ember_staff_master_addrs_v1', JSON.stringify(directList)); } catch (e) {}
+                        }
+                    }
+
                     const res = await fetchGas(`${activeGasUrl}?action=get_all&depId=${DEFAULT_DEP_SHEET_ID}&masterId=${activeDictSheetId}&skipHeavy=false&t=${Date.now()}`);
                     const incoming = [];
                     if (res && (res.status === 'success' || res.success) && Array.isArray(res.masterAddresses)) {
@@ -1868,21 +1890,9 @@
                     }
 
                     if (incoming.length > 0) {
-                        setMasterAddresses(prev => {
-                            const map = new Map();
-                            // 동명이인(홍당무-3k4, 홍당무-5kj 또는 같은 닉네임 다른 전화번호)이 둘 다 보존되도록 [닉네임 + 연락처 뒷4자리]를 고유 키로 사용!
-                            prev.forEach(item => {
-                                const k = `${normalizeString(item.nickname || item.realname)}___${fixPhoneNumber(item.phone).slice(-4)}`;
-                                if (k && item.address) map.set(k, item);
-                            });
-                            incoming.forEach(item => {
-                                const k = `${normalizeString(item.nickname || item.realname)}___${fixPhoneNumber(item.phone).slice(-4)}`;
-                                if (k && item.address) map.set(k, item);
-                            });
-                            const finalArr = Array.from(map.values());
-                            try { localStorage.setItem('ember_staff_master_addrs_v1', JSON.stringify(finalArr)); } catch (e) {}
-                            return finalArr;
-                        });
+                        // ✨ 시트에서 수정/삭제한 내역이 100% 그대로 반영되도록 이전 로컬 캐시(prev)를 섞지 않고 시트 데이터로 즉시 교체!
+                        setMasterAddresses(incoming);
+                        try { localStorage.setItem('ember_staff_master_addrs_v1', JSON.stringify(incoming)); } catch (e) {}
                     }
                 } catch (e) {}
             }, [activeGasUrl, activeDictSheetId]);
