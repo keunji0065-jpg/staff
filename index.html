@@ -77,7 +77,7 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 361; // 361 => v3.61
+        const VERSION_STEP = 363; // 363 => v3.63
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.29";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzP4BvhxNoi0GbKZi1NTkrIxiqbZnL61MjjHIQi2NnyChrPF8Uk0An9XewdCoIJmSy7/exec';
@@ -2317,6 +2317,135 @@
                                 nextStore[tabKey] = { ...blk, groups: nextGroups };
                             }
                         });
+
+                        // ✨ 고객이 포털에서 입력한 최신 주소를 직원용 masterAddresses 사전과 사장님 마스터 시트('찐고객사전')에도 최신 1건으로 동기화!
+                        const allLatestAddrs = [];
+                        Object.values(allVal).forEach(bMap => {
+                            if (bMap && typeof bMap === 'object') {
+                                Object.values(bMap).forEach(entry => {
+                                    if (entry && entry.nickname && (entry.address || entry.baseAddress)) {
+                                        allLatestAddrs.push(entry);
+                                    }
+                                });
+                            }
+                        });
+                        if (allLatestAddrs.length > 0) {
+                            setMasterAddresses(prev => {
+                                let mChanged = false;
+                                const map = new Map();
+                                prev.forEach(item => map.set(normalizeString(item.nickname), item));
+                                allLatestAddrs.forEach(item => {
+                                    const k = normalizeString(item.nickname);
+                                    const ex = map.get(k);
+                                    const cleanA = stripZipcode(item.address || item.baseAddress || '');
+                                    const cleanP = fixPhoneNumber(item.phone || '');
+                                    const cleanM = cleanMemoText(item.memo || '', cleanA);
+                                    if (!ex || ex.address !== cleanA || ex.realname !== (item.realname || '') || ex.phone !== cleanP) {
+                                        mChanged = true;
+                                        map.set(k, {
+                                            nickname: item.nickname,
+                                            realname: item.realname || ex?.realname || '',
+                                            phone: cleanP || ex?.phone || '',
+                                            address: cleanA,
+                                            memo: cleanM
+                                        });
+                                    }
+                                });
+                                if (mChanged) {
+                                    const merged = Array.from(map.values());
+                                    try { localStorage.setItem('ember_staff_master_addrs_v1', JSON.stringify(merged)); } catch (e) {}
+                                    return merged;
+                                }
+                                return prev;
+                            });
+                        }
+
+                        // ✨ 핵심: 고객이 포털에서 주소를 입력해 로컬 스토어가 변경되면 즉시 직원용 구글 시트('메인주문')에도 백그라운드로 자동 저장!
+                        if (storeChanged) {
+                            localBroadcastStoreRef.current = nextStore;
+                            try { localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(nextStore)); } catch (e) {}
+                            if (autoSaveOrdersTimerRef.current) clearTimeout(autoSaveOrdersTimerRef.current);
+                            autoSaveOrdersTimerRef.current = setTimeout(() => {
+                                const latestStore = localBroadcastStoreRef.current;
+                                const allCombinedRows = [];
+                                Object.keys(latestStore)
+                                    .filter(k => k.startsWith('주문_') && !['주문_기본방송', '주문_주문', '주문_주문통합', '주문_메인주문'].includes(k))
+                                    .sort((a, b) => extractBroadcastDateScore(b) - extractBroadcastDateScore(a))
+                                    .forEach(tKey => {
+                                        const blk = latestStore[tKey];
+                                        if (blk && Array.isArray(blk.groups) && blk.groups.length > 0) {
+                                            const bTitle = cleanDisplayTabName(blk.broadcastName || tKey);
+                                            const cRate = Number(blk.cardFeeRate) || 10;
+                                            allCombinedRows.push({
+                                                '닉네임': '___WORKSPACE_META___',
+                                                '주문자': '___WORKSPACE_META___',
+                                                customer: '___WORKSPACE_META___',
+                                                nickname: '___WORKSPACE_META___',
+                                                name: '___WORKSPACE_META___',
+                                                '상품명': bTitle,
+                                                product: bTitle,
+                                                '수량': Number(blk.freeShipThreshold) || 70000,
+                                                quantity: Number(blk.freeShipThreshold) || 70000,
+                                                qty: Number(blk.freeShipThreshold) || 70000,
+                                                '단가(제품금액)': Number(blk.defaultShipping) || 4000,
+                                                price: Number(blk.defaultShipping) || 4000,
+                                                '배송비': cRate,
+                                                shipping: cRate,
+                                                '입금액': 0,
+                                                deposit: 0,
+                                                '카드결제': '', '수령인명': '', '연락처': '', '주소': '', '요청사항': '',
+                                                'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
+                                            });
+                                            blk.groups.forEach(g => {
+                                                const sum = getGroupSummary(g);
+                                                const baseCardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
+                                                const cashStr = g.cashReceiptMode === 'completed' ? '현영완료' : (g.cashReceiptMode === 'requested' ? '현영요청' : '');
+                                                const cardStr = [baseCardStr, cashStr].filter(Boolean).join(' / ');
+                                                const cleanPh = fixPhoneNumber(g.phone);
+                                                const pinStr = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
+                                                const depJson = Array.isArray(g.deposits) && g.deposits.length > 0 ? JSON.stringify(g.deposits) : '';
+                                                const itemsList = (g.items && g.items.length > 0) ? g.items : [{ product: '', qty: 1, price: 0, isWaitlist: false, waitlistOrder: 0 }];
+                                                itemsList.forEach((it, idx) => {
+                                                    const waitCell = it.isWaitlist ? `대기${it.waitlistOrder || 1}번` : '';
+                                                    allCombinedRows.push({
+                                                        '닉네임': g.nick, '주문자': g.nick, customer: g.nick, nickname: g.nick, name: g.nick,
+                                                        '상품명': it.product || '', product: it.product || '',
+                                                        '수량': Number(it.qty) || 1, quantity: Number(it.qty) || 1, qty: Number(it.qty) || 1,
+                                                        '단가(제품금액)': Number(it.price) || 0, price: Number(it.price) || 0,
+                                                        '배송비': sum.ship, shipping: sum.ship,
+                                                        '입금액': idx === 0 ? sum.dep : 0, deposit: idx === 0 ? sum.dep : 0,
+                                                        '카드결제': cardStr,
+                                                        '수령인명': g.realname || '',
+                                                        '연락처': cleanPh ? "'" + cleanPh : '',
+                                                        '주소': stripZipcode(g.address || ''),
+                                                        '요청사항': cleanMemoText(g.memo, g.address),
+                                                        'VIP여부': g.isVip ? 'O' : '',
+                                                        '노쇼여부': g.isNoShow ? 'O' : '',
+                                                        '대기여부': waitCell,
+                                                        '비밀번호': pinStr ? "'" + pinStr : '',
+                                                        '주문확인': g.isConfirmed ? 'O' : '',
+                                                        '입금내역JSON': idx === 0 ? depJson : '',
+                                                        '송장번호': g.trackingNumber ? "'" + String(g.trackingNumber).replace(/^'+/, '') : ''
+                                                    });
+                                                });
+                                            });
+                                        }
+                                    });
+                                if (allCombinedRows.length > 0) {
+                                    allCombinedRows.push({
+                                        '닉네임': '___WORKSPACE_META___',
+                                        '상품명': '오늘의방송',
+                                        '수량': 70000,
+                                        '단가(제품금액)': 4000,
+                                        '배송비': 10,
+                                        '입금액': 0
+                                    });
+                                    pendingOrdersRowsRef.current = allCombinedRows;
+                                    flushOrdersQueueToSheet();
+                                }
+                            }, 600);
+                        }
+
                         return storeChanged ? nextStore : prevStore;
                     });
 
