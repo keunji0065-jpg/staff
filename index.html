@@ -77,10 +77,10 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 353; // 353 => v3.53
+        const VERSION_STEP = 357; // 357 => v3.57
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.29";
-        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzckcaobzdpOmXyBb2UHIatOk7vDJhs344fyOc7e8RKYZ5WS8JKXrdSQPpWz0jTWN8a/exec';
+        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbxhX10VQMbxZIWrIGJGHZp7POtTh9zmqa4awhOpLFJTs58L_nrg5Opw8ha2IFVLU-b_/exec';
         const DEFAULT_STAFF_SHEET_ID = '1sM5bkDqEjD6Kpxu2yoJe2aiMuqpcWLMAIGpY3iL5_x8';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
         const DEFAULT_DEP_SHEET_ID = '14bx2HMd_NID3zQN-Hb0x0At2Qmti7-p1Zfx1ZadNScY';
@@ -97,7 +97,7 @@
         const normalizeHandleNick = (str) => {
             if (!str) return '';
             let s = String(str).trim();
-            s = s.replace(/-[a-zA-Z0-9_]{1,10}$/, '');
+            s = s.replace(/-(?=[a-zA-Z0-9_]*[a-zA-Z])[a-zA-Z0-9_]{3,10}$/, '');
             return normalizeString(s);
         };
 
@@ -1920,7 +1920,7 @@
                     }
 
                     // 2순위: 핸들 제거 닉네임 매칭 (단, 홍당무-3k4와 홍당무-5kj처럼 서로 다른 핸들을 쓰는 경우 절대 자동 매칭 금지!)
-                    const hasExplicitHandleOnOrder = /-[a-zA-Z0-9_]{1,10}$/.test(String(nick).trim());
+                    const hasExplicitHandleOnOrder = /-(?=[a-zA-Z0-9_]*[a-zA-Z])[a-zA-Z0-9_]{3,10}$/.test(String(nick).trim());
                     if (targetHandle && targetHandle.length >= 2) {
                         const handleMatches = masterAddresses.filter(a => normalizeHandleNick(a.nickname) === targetHandle && a.address);
                         if (cleanPin && handleMatches.length > 0) {
@@ -1930,7 +1930,7 @@
                         const distinctNicks = new Set(handleMatches.map(a => normalizeString(a.nickname)));
                         const distinctPhones = new Set(handleMatches.map(a => fixPhoneNumber(a.phone)).filter(Boolean));
                         if (handleMatches.length === 1 && distinctNicks.size === 1 && distinctPhones.size <= 1) {
-                            const candHasHandle = /-[a-zA-Z0-9_]{1,10}$/.test(String(handleMatches[0].nickname || '').trim());
+                            const candHasHandle = /-(?=[a-zA-Z0-9_]*[a-zA-Z])[a-zA-Z0-9_]{3,10}$/.test(String(handleMatches[0].nickname || '').trim());
                             if (!(hasExplicitHandleOnOrder && candHasHandle)) {
                                 return handleMatches[0];
                             }
