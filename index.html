@@ -77,7 +77,7 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 359; // 359 => v3.59
+        const VERSION_STEP = 360; // 360 => v3.60
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.29";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbxhX10VQMbxZIWrIGJGHZp7POtTh9zmqa4awhOpLFJTs58L_nrg5Opw8ha2IFVLU-b_/exec';
@@ -1333,6 +1333,27 @@
             const [activeSuggestRowId, setActiveSuggestRowId] = useState(null);
             const liveNextPageTokenRef = useRef('');
             const unsavedLiveChatsRef = useRef([]);
+            const myStaffPollerTabIdRef = useRef(`staff_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
+            const [isStaffActivePoller, setIsStaffActivePoller] = useState(true);
+
+            // 🛡️ 사장님 주문서에서 방송을 시작했거나 다른 직원 탭에서 연결했을 때 중복 유튜브 API 호출을 자동 차단!
+            useEffect(() => {
+                if (!staffFbDb) return;
+                const modeRef = staffFbDb.ref('ember_live_data/_portal_live_mode');
+                const handleMode = (snap) => {
+                    const val = snap.val() || {};
+                    if (val.liveOwner === 'boss' && val.isLive) {
+                        setIsStaffActivePoller(false);
+                        setIsLiveChatPaused(true);
+                    } else if (val.activePollerTabId && val.activePollerTabId !== myStaffPollerTabIdRef.current && val.liveOwner === 'staff') {
+                        setIsStaffActivePoller(false);
+                    } else {
+                        setIsStaffActivePoller(true);
+                    }
+                };
+                modeRef.on('value', handleMode);
+                return () => modeRef.off('value', handleMode);
+            }, []);
 
             // 라이브 주문서 작성 데이터 실시간 자동 로컬 백업 (창이 닫히거나 탭을 이동해도 100% 보존)
             useEffect(() => {
@@ -2578,9 +2599,17 @@
                         if (chatId) {
                             liveNextPageTokenRef.current = '';
                             setIsLiveChatPaused(false);
+                            setIsStaffActivePoller(true);
                             setLiveChatId(chatId);
                             setIsStaffLiveActive(true);
                             if (staffFbDb) {
+                                staffFbDb.ref('ember_live_data/_portal_live_mode').update({
+                                    isLive: true,
+                                    liveOwner: 'staff',
+                                    activePollerTabId: myStaffPollerTabIdRef.current,
+                                    activeBroadcastName: cleanDisplayTabName(liveBroadcastTitle || '오늘의방송'),
+                                    updatedAt: Date.now()
+                                }).catch(() => {});
                                 staffFbDb.ref('ember_live_data/_global_config').update({
                                     catalogClosedLock: false,
                                     isStoreClosed: false
@@ -2604,13 +2633,13 @@
                         `선택하신 영상${endedStreamTitle ? ` [${endedStreamTitle}]` : ''}은 현재 '실시간 스트리밍 중'이 아니거나 이미 종료된 다시보기 영상입니다.\n\n💡 유튜브 정책상 실시간 채팅 수집은 현재 생방송(LIVE)이 켜져 있는 영상에서만 작동합니다.`
                     );
                 } else {
-                    openModal(`등록된 유튜브 API 키(${apiKeys.length}개)가 모두 일일 할당량을 초과했거나 호출에 실패했습니다.\n사유: ${lastErrorMsg || '할당량 초과'}`);
+                    openModal(`유튜브 연결 실패: ${lastErrorMsg || '등록된 모든 API 키의 일일 할당량이 초과되었거나 잘못된 키입니다.'}`);
                 }
             };
 
-            // 유튜브 라이브 채팅 폴링 (할당량 소진된 키는 즉시 다음 키로 자동 전환!)
+            // 유튜브 라이브 채팅 폴링 (오직 방송을 시작한 단일 탭에서만 실행 & 할당량 소진된 키는 즉시 다음 키로 자동 전환!)
             useEffect(() => {
-                if (activeMainTab !== 'live_order' || !liveChatId || !sharedYtApiKey || isLiveChatPaused) return;
+                if (activeMainTab !== 'live_order' || !liveChatId || !sharedYtApiKey || isLiveChatPaused || !isStaffLiveActive || !isStaffActivePoller) return;
                 let timer = null;
                 let cancelled = false;
                 const keys = Array.from(new Set(String(sharedYtApiKey).match(/AIza[0-9A-Za-z\-_]{35}/g) || []));
@@ -2623,6 +2652,7 @@
                     if (aliveKeys.length === 0) return;
                     const curKey = aliveKeys[keyIdx % aliveKeys.length];
 
+                    let nextWaitMs = 5500;
                     try {
                         let url = `https://www.googleapis.com/youtube/v3/liveChat/messages?liveChatId=${liveChatId}&part=snippet,authorDetails&maxResults=200&key=${curKey}`;
                         if (liveNextPageTokenRef.current) url += `&pageToken=${liveNextPageTokenRef.current}`;
@@ -2637,24 +2667,29 @@
                                     return;
                                 }
                             }
-                        } else if (Array.isArray(data.items) && data.items.length > 0) {
-                            if (data.nextPageToken) liveNextPageTokenRef.current = data.nextPageToken;
-                            const incoming = data.items.map(item => ({
-                                id: item.id,
-                                time: new Date(item.snippet.publishedAt).toLocaleTimeString('ko-KR', { hour12: false, hour: '2-digit', minute: '2-digit' }),
-                                nickname: String(item.authorDetails.displayName || '').replace(/@/g, '').trim(),
-                                content: item.snippet.displayMessage
-                            }));
-                            unsavedLiveChatsRef.current.push(...incoming);
-                            setLiveChats(prev => {
-                                const map = new Map();
-                                [...prev, ...incoming].forEach(c => map.set(c.id, c));
-                                const arr = Array.from(map.values());
-                                return arr.slice(-500);
-                            });
+                        } else {
+                            if (data.pollingIntervalMillis) {
+                                nextWaitMs = Math.max(5500, Number(data.pollingIntervalMillis));
+                            }
+                            if (Array.isArray(data.items) && data.items.length > 0) {
+                                if (data.nextPageToken) liveNextPageTokenRef.current = data.nextPageToken;
+                                const incoming = data.items.map(item => ({
+                                    id: item.id,
+                                    time: new Date(item.snippet.publishedAt).toLocaleTimeString('ko-KR', { hour12: false, hour: '2-digit', minute: '2-digit' }),
+                                    nickname: String(item.authorDetails.displayName || '').replace(/@/g, '').trim(),
+                                    content: item.snippet.displayMessage
+                                }));
+                                unsavedLiveChatsRef.current.push(...incoming);
+                                setLiveChats(prev => {
+                                    const map = new Map();
+                                    [...prev, ...incoming].forEach(c => map.set(c.id, c));
+                                    const arr = Array.from(map.values());
+                                    return arr.slice(-500);
+                                });
+                            }
                         }
                     } catch (e) {}
-                    if (!cancelled) timer = setTimeout(pollChat, 4500);
+                    if (!cancelled) timer = setTimeout(pollChat, nextWaitMs);
                 };
                 pollChat();
 
@@ -2676,7 +2711,7 @@
                     if (timer) clearTimeout(timer);
                     clearInterval(backupInterval);
                 };
-            }, [activeMainTab, liveChatId, sharedYtApiKey, isLiveChatPaused, activeGasUrl, activeDictSheetId, liveBroadcastTitle]);
+            }, [activeMainTab, liveChatId, sharedYtApiKey, isLiveChatPaused, isStaffLiveActive, isStaffActivePoller, activeGasUrl, activeDictSheetId, liveBroadcastTitle]);
 
             // 직원이 라이브 주문표를 수정할 때마다 고객용 셀프 포털(__MAIN_LIVE__)에 실시간 미러링
             const syncStaffLiveRowsToPortal = useCallback((rowsToSync, bTitle, isLiveOn) => {
