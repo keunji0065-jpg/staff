@@ -77,7 +77,7 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 357; // 357 => v3.57
+        const VERSION_STEP = 359; // 359 => v3.59
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.10.29";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbxhX10VQMbxZIWrIGJGHZp7POtTh9zmqa4awhOpLFJTs58L_nrg5Opw8ha2IFVLU-b_/exec';
@@ -2016,22 +2016,19 @@
                     delete discoveredBlocks['주문_10/24 라이브'];
                     delete discoveredBlocks['10/24 라이브'];
 
-                    // 🧹 시트에서 삭제된 방송(예: 테스트로 만든 10/24 라이브 등)이 파이어베이스(_portal_orders)에 남아있다면 되살리지 않고 클라우드에서도 즉시 자동 삭제!
+                    // 🧹 시트에서 삭제된 방송이 파이어베이스(_portal_orders)에 남아있다면 정리하되, 현재 진행 중인 생방송(__MAIN_LIVE__)은 절대 건드리지 않고 100% 보호!
                     if (staffFbDb) {
                         try {
                             const fbOrdersSnap = await staffFbDb.ref('ember_live_data/_portal_orders').once('value');
                             const fbOrdersVal = fbOrdersSnap.val() || {};
                             Object.keys(fbOrdersVal).forEach(safeKey => {
                                 if (safeKey === '__MAIN_LIVE__') {
-                                    if (!isStaffLiveActive) {
-                                        staffFbDb.ref('ember_live_data/_portal_orders/__MAIN_LIVE__').remove().catch(() => {});
-                                    }
                                     return;
                                 }
                                 const node = fbOrdersVal[safeKey];
                                 const cleanB = cleanDisplayTabName(node?.broadcastName || safeKey);
                                 const tabKey = '주문_' + cleanB;
-                                if (!discoveredBlocks[tabKey]) {
+                                if (!discoveredBlocks[tabKey] && node?.updatedBy !== 'staff') {
                                     staffFbDb.ref(`ember_live_data/_portal_orders/${safeKey}`).remove().catch(() => {});
                                 }
                             });
@@ -2301,6 +2298,52 @@
                         });
                         return storeChanged ? nextStore : prevStore;
                     });
+
+                    // 3) 직원이 현재 [🎥 라이브 주문서]를 켜놓고 주문을 작성 중일 때도 고객이 포털에서 주소를 입력하면 실시간으로 라이브 작성표(liveOrderRows)에 즉시 채워넣기!
+                    const cleanLiveTitle = cleanDisplayTabName(liveBroadcastTitle || '');
+                    const safeLiveKey = cleanLiveTitle ? cleanLiveTitle.replace(/[.#$\[\]\/]/g, '_') : '';
+                    const liveAddrMap = {
+                        ...(allVal['__MAIN_LIVE__'] || {}),
+                        ...(allVal['메인주문'] || {}),
+                        ...(safeLiveKey ? (allVal[safeLiveKey] || {}) : {})
+                    };
+                    const liveAddrEntries = Object.values(liveAddrMap).filter(a => a && a.nickname && (a.address || a.baseAddress));
+                    if (liveAddrEntries.length > 0) {
+                        setLiveOrderRows(prevRows => {
+                            let rowsChanged = false;
+                            const nextRows = prevRows.map(r => {
+                                if (!r.nick) return r;
+                                const rPin = normalizePin4(r.pin) || (r.phone ? fixPhoneNumber(r.phone).slice(-4) : '');
+                                const matched = liveAddrEntries.find(a => {
+                                    if (normalizeString(a.nickname) === normalizeString(r.nick)) {
+                                        const aPin = a.phone ? fixPhoneNumber(a.phone).slice(-4) : '';
+                                        if (rPin && aPin && rPin !== aPin) return false;
+                                        return true;
+                                    }
+                                    return false;
+                                });
+                                if (!matched) return r;
+                                const newAddrStr = stripZipcode(matched.address || `${matched.baseAddress || ''} ${matched.detailAddress || ''}`.trim());
+                                const newReal = matched.realname || r.realname || '';
+                                const newPh = fixPhoneNumber(matched.phone || r.phone || '');
+                                const newMemo = cleanMemoText(matched.memo ?? r.memo, newAddrStr);
+                                const newPin = newPh.length >= 4 ? newPh.slice(-4) : r.pin;
+                                if (newAddrStr && (r.address !== newAddrStr || r.realname !== newReal || r.phone !== newPh || r.memo !== newMemo || r.pin !== newPin)) {
+                                    rowsChanged = true;
+                                    return {
+                                        ...r,
+                                        realname: newReal,
+                                        phone: newPh,
+                                        address: newAddrStr,
+                                        memo: newMemo,
+                                        pin: newPin
+                                    };
+                                }
+                                return r;
+                            });
+                            return rowsChanged ? nextRows : prevRows;
+                        });
+                    }
                 };
 
                 const handlePortalConfirmChange = (snap) => {
@@ -2334,7 +2377,7 @@
                     allAddrRef.off('value', handlePortalAllAddrChange);
                     confRef.off('value', handlePortalConfirmChange);
                 };
-            }, [broadcastName, selectedTab]);
+            }, [broadcastName, selectedTab, liveBroadcastTitle]);
 
             // ✨ 고객이 포털에서 본인의 환불 계좌번호를 직접 입력하거나 수정했을 때 직원용 CS 화면에도 실시간으로 자동 반영!
             useEffect(() => {
@@ -3206,18 +3249,29 @@
 
             const handleGlobalSearch = async () => {
                 const kw = globalKeyword.trim();
-                if (!kw) return;
+                if (!kw) {
+                    setGlobalSearchResults(null);
+                    return;
+                }
+                // 만약 라이브 주문서 탭 등에서 검색을 눌렀다면 결과창이 바로 보이도록 주문조회 화면으로 자동 전환
+                if (activeMainTab === 'live_order' || activeMainTab === 'tracking' || activeMainTab === 'export') {
+                    setActiveMainTab('orders');
+                }
                 setIsSearchingGlobal(true);
                 const normKw = normalizeString(kw);
                 const localResults = [];
+                const seenKeys = new Set();
 
-                csGroups.forEach(c => {
+                // 1) 미송 / 교환 / 반품 (CS) 전체 검색
+                (csGroups || []).forEach(c => {
                     const hay = normalizeString([
                         c.sourceBroadcast, c.nick, c.realname, c.phone, c.address,
                         c.origTracking, c.csTracking, c.csMemo, c.refundAccount,
                         (c.items || []).map(i => i.product).join(' ')
                     ].join(' '));
                     if (hay.includes(normKw)) {
+                        const uKey = `CS_${c.id || c.sourceBroadcast}_${normalizeString(c.nick)}`;
+                        seenKeys.add(uKey);
                         localResults.push({
                             recordType: 'CS',
                             broadcastName: c.sourceBroadcast,
@@ -3234,42 +3288,73 @@
                     }
                 });
 
-                Object.entries(localBroadcastStore || {}).forEach(([tabName, bData]) => {
-                    const bName = String(bData?.broadcastName || tabName).replace(/^주문_/, '');
-                    (bData?.groups || []).forEach(g => {
-                        const hay = normalizeString([
-                            g.nick, g.realname, g.phone, g.address, g.trackingNumber,
-                            (g.items || []).map(i => i.product).join(' ')
-                        ].join(' '));
-                        if (hay.includes(normKw)) {
-                            localResults.push({
-                                recordType: 'ORDER',
-                                tabName,
-                                broadcastName: bName,
-                                nick: g.nick,
-                                realname: g.realname,
-                                phone: g.phone,
-                                address: g.address,
-                                trackingNumber: g.trackingNumber,
-                                shipping: g.shipping,
-                                deposit: g.deposit,
-                                items: g.items || []
-                            });
-                        }
+                // 2) 현재 열려 있는 방송(customerGroups) + 전 방송 창고(localBroadcastStore) 통합 검색
+                const combinedStore = { ...(localBroadcastStoreRef.current || {}), ...(localBroadcastStore || {}) };
+                const cleanCurB = cleanDisplayTabName(broadcastName || selectedTab || '');
+                if (cleanCurB && Array.isArray(customerGroups) && customerGroups.length > 0) {
+                    combinedStore['주문_' + cleanCurB] = {
+                        broadcastName: cleanCurB,
+                        groups: customerGroups
+                    };
+                }
+
+                Object.keys(combinedStore)
+                    .sort((a, b) => extractBroadcastDateScore(b) - extractBroadcastDateScore(a))
+                    .forEach(tabName => {
+                        const bData = combinedStore[tabName];
+                        const bName = cleanDisplayTabName(bData?.broadcastName || tabName);
+                        if (!bName || ['기본방송', '오늘의방송', '메인주문'].includes(bName)) return;
+                        (bData?.groups || []).forEach(g => {
+                            const hay = normalizeString([
+                                bName, g.nick, g.realname, g.phone, g.address, g.memo, g.trackingNumber,
+                                (g.items || []).map(i => i.product).join(' ')
+                            ].join(' '));
+                            if (hay.includes(normKw)) {
+                                const uKey = `ORDER_${normalizeString(bName)}_${normalizeString(g.nick)}`;
+                                if (!seenKeys.has(uKey)) {
+                                    seenKeys.add(uKey);
+                                    localResults.push({
+                                        recordType: 'ORDER',
+                                        tabName: tabName.startsWith('주문_') ? tabName : ('주문_' + bName),
+                                        broadcastName: bName,
+                                        nick: g.nick,
+                                        realname: g.realname,
+                                        phone: g.phone,
+                                        address: g.address,
+                                        trackingNumber: g.trackingNumber,
+                                        shipping: g.shipping,
+                                        deposit: g.deposit,
+                                        items: g.items || []
+                                    });
+                                }
+                            }
+                        });
                     });
-                });
+
+                // ⚡ 서버 응답을 기다리지 않고 0.01초 만에 즉시 로컬 통합검색 결과를 먼저 화면에 띄움!
+                setGlobalSearchResults(localResults);
 
                 try {
-                    const res = await fetchGas(`${activeGasUrl}?action=search_all_broadcasts&masterId=${activeStaffSheetId}&keyword=${encodeURIComponent(kw)}&t=${Date.now()}`);
+                    const res = await fetchGas(`${activeGasUrl}?action=search_all_broadcasts&masterId=${activeStaffSheetId}&keyword=${encodeURIComponent(kw)}&t=${Date.now()}`, null, 10000);
                     const serverResults = (res && res.success && Array.isArray(res.results)) ? res.results : [];
-                    const merged = [...localResults];
-                    serverResults.forEach(sr => {
-                        const exists = merged.some(m => m.recordType === sr.recordType && m.broadcastName === sr.broadcastName && normalizeString(m.nick) === normalizeString(sr.nick));
-                        if (!exists) merged.push(sr);
-                    });
-                    setGlobalSearchResults(merged);
+                    if (serverResults.length > 0) {
+                        const merged = [...localResults];
+                        serverResults.forEach(sr => {
+                            const srBName = cleanDisplayTabName(sr.broadcastName || '');
+                            const uKey = `${sr.recordType}_${normalizeString(srBName)}_${normalizeString(sr.nick)}`;
+                            if (!seenKeys.has(uKey)) {
+                                seenKeys.add(uKey);
+                                merged.push({
+                                    ...sr,
+                                    broadcastName: srBName,
+                                    tabName: sr.tabName || ('주문_' + srBName)
+                                });
+                            }
+                        });
+                        setGlobalSearchResults(merged);
+                    }
                 } catch (e) {
-                    setGlobalSearchResults(localResults);
+                    // 로컬 결과가 이미 표시되어 있으므로 에러 무시
                 } finally {
                     setIsSearchingGlobal(false);
                 }
@@ -4479,25 +4564,42 @@
                         </div>
 
                         <div className="flex items-center gap-1.5 flex-wrap flex-1 justify-end">
-                            <div className="relative flex-1 min-w-[160px] max-w-xs">
+                            <form
+                                onSubmit={(e) => {
+                                    e.preventDefault();
+                                    handleGlobalSearch();
+                                }}
+                                className="relative flex-1 min-w-[160px] max-w-xs"
+                            >
                                 <Icon name="magnifying-glass" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" size={13} />
                                 <input
                                     type="text"
                                     value={globalKeyword}
-                                    onChange={e => setGlobalKeyword(e.target.value)}
-                                    onKeyDown={e => { if (e.key === 'Enter') handleGlobalSearch(); }}
+                                    onChange={e => {
+                                        const v = e.target.value;
+                                        setGlobalKeyword(v);
+                                        if (!v.trim()) setGlobalSearchResults(null);
+                                    }}
                                     placeholder="전 방송 통합검색 (닉네임/수령인/연락처/상품)..."
-                                    className="w-full pl-7 pr-14 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-extrabold text-slate-800 outline-none focus:bg-white focus:border-blue-600"
+                                    className="w-full pl-7 pr-16 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-extrabold text-slate-800 outline-none focus:bg-white focus:border-blue-600"
                                 />
+                                {globalKeyword && (
+                                    <button
+                                        type="button"
+                                        onClick={() => { setGlobalKeyword(''); setGlobalSearchResults(null); }}
+                                        className="absolute right-12 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5"
+                                    >
+                                        <Icon name="x-circle" weight="fill" size={13} />
+                                    </button>
+                                )}
                                 <button
-                                    type="button"
-                                    onClick={handleGlobalSearch}
+                                    type="submit"
                                     disabled={isSearchingGlobal}
                                     className="absolute right-1 top-1/2 -translate-y-1/2 px-2 py-0.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[10px] font-extrabold"
                                 >
                                     {isSearchingGlobal ? '...' : '통합검색'}
                                 </button>
-                            </div>
+                            </form>
 
                             <button
                                 type="button"
@@ -5181,10 +5283,13 @@
                                                                 </button>
                                                                 <button
                                                                     onClick={() => {
-                                                                        setSelectedTab(res.tabName);
+                                                                        const targetTabKey = res.tabName || ('주문_' + cleanDisplayTabName(res.broadcastName));
+                                                                        setSelectedTab(targetTabKey);
+                                                                        setLocalSearchTerm(res.nick || globalKeyword);
+                                                                        setStatusFilter('all');
                                                                         setGlobalSearchResults(null);
                                                                         setActiveMainTab('orders');
-                                                                        loadSheetOrders(res.tabName);
+                                                                        loadSheetOrders(targetTabKey);
                                                                     }}
                                                                     className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-extrabold text-[11px]"
                                                                 >
@@ -5194,6 +5299,8 @@
                                                         ) : (
                                                             <button
                                                                 onClick={() => {
+                                                                    setCsSearchTerm(res.nick || globalKeyword);
+                                                                    setCsStatusFilter('all');
                                                                     setGlobalSearchResults(null);
                                                                     setActiveMainTab('cs');
                                                                 }}
