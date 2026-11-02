@@ -77,9 +77,9 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 363; // 363 => v3.63
+        const VERSION_STEP = 366; // 366 => v3.66
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
-        const LAST_MODIFIED_DATE = "2026.10.29";
+        const LAST_MODIFIED_DATE = "2026.11.03";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzP4BvhxNoi0GbKZi1NTkrIxiqbZnL61MjjHIQi2NnyChrPF8Uk0An9XewdCoIJmSy7/exec';
         const DEFAULT_STAFF_SHEET_ID = '1sM5bkDqEjD6Kpxu2yoJe2aiMuqpcWLMAIGpY3iL5_x8';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
@@ -1412,7 +1412,11 @@
                 return 0;
             }, [customerCredits]);
 
-            const getGroupSummary = useCallback((g) => {
+            const getGroupSummary = useCallback((g, fThreshOverride = null, dShipOverride = null, cRateOverride = null) => {
+                const useFThresh = fThreshOverride !== null && fThreshOverride !== undefined ? Number(fThreshOverride) : Number(freeShipThreshold);
+                const useDShip = dShipOverride !== null && dShipOverride !== undefined ? Number(dShipOverride) : Number(defaultShipping);
+                const useCRate = cRateOverride !== null && cRateOverride !== undefined ? Number(cRateOverride) : Number(cardFeeRate);
+
                 const activeItems = (g.items || []).filter(i => !i.isWaitlist);
                 const waitItems = (g.items || []).filter(i => i.isWaitlist);
                 const prodTotal = activeItems.reduce((s, i) => s + (Number(i.price) || 0), 0);
@@ -1424,8 +1428,8 @@
                         ship = Number(g.shipping);
                     } else {
                         const isJeju = Boolean(g.address && g.address.includes('제주'));
-                        const isFreeShip = freeShipThreshold > 0 && prodForShip >= freeShipThreshold;
-                        const baseShip = isFreeShip ? 0 : defaultShipping;
+                        const isFreeShip = useFThresh > 0 && prodForShip >= useFThresh;
+                        const baseShip = isFreeShip ? 0 : useDShip;
                         const jejuExtra = isJeju ? 3000 : 0;
                         ship = baseShip + jejuExtra;
                     }
@@ -1433,7 +1437,7 @@
                 const baseGrand = prodTotal + ship;
                 const dep = Number(g.deposit) || 0;
                 const baseBal = baseGrand - dep;
-                const feeRate = Number(cardFeeRate) > 0 ? Number(cardFeeRate) / 100 : 0.1;
+                const feeRate = useCRate > 0 ? useCRate / 100 : 0.1;
                 const cardFee = (g.cardMode !== 'none' && baseBal > 0) ? Math.round(baseBal * feeRate) : 0;
                 const finalGrand = baseGrand + cardFee;
                 const finalBal = baseBal + cardFee;
@@ -1537,7 +1541,7 @@
                             'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
                         }];
                         (groupsArr || []).forEach(g => {
-                            const sum = getGroupSummary(g);
+                            const sum = getGroupSummary(g, fThresh, dShip, cRate);
                             const baseCardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
                             const cashStr = g.cashReceiptMode === 'completed' ? '현영완료' : (g.cashReceiptMode === 'requested' ? '현영요청' : '');
                             const cardStr = [baseCardStr, cashStr].filter(Boolean).join(' / ');
@@ -2123,9 +2127,24 @@
                         } catch (fbErr) {}
                     }
 
-                    // 시트에서 정상적으로 읽어왔다면 옛날 로컬 캐시(시트에서 지운 방송들)를 버리고 시트 원본(discoveredBlocks)으로 100% 일치시킵니다!
+                    // 🛡️ 핵심 보호: 직원이 방금 화면에서 완납/노쇼해제/카드완료 등을 수정한 지 30초 이내(STAFF_LOCAL_DIRTY_TIME_KEY)라면,
+                    // 구글 시트의 느린 응답이 직원이 방금 수정한 최신 로컬 상태(isNoShow: false, deposit 등)를 옛날 노쇼 상태로 되돌리지 못하도록 로컬 최신본을 최우선 유지!
+                    const lastDirtyTs = Number(localStorage.getItem(STAFF_LOCAL_DIRTY_TIME_KEY) || '0');
+                    const isRecentlyModifiedByStaff = (Date.now() - lastDirtyTs < 30000);
+                    const currentLocalStore = localBroadcastStoreRef.current || {};
+
                     const hasSheetData = Array.isArray(gasOrderRows) || Object.keys(discoveredBlocks).length > 0;
-                    const finalBlocksMap = hasSheetData ? discoveredBlocks : {};
+                    const finalBlocksMap = hasSheetData ? { ...discoveredBlocks } : { ...currentLocalStore };
+
+                    if (isRecentlyModifiedByStaff && Object.keys(currentLocalStore).length > 0) {
+                        Object.keys(currentLocalStore).forEach(tabKey => {
+                            const localBlk = currentLocalStore[tabKey];
+                            if (localBlk && Array.isArray(localBlk.groups) && localBlk.groups.length > 0) {
+                                finalBlocksMap[tabKey] = localBlk;
+                            }
+                        });
+                    }
+
                     setLocalBroadcastStore(finalBlocksMap);
                     localBroadcastStoreRef.current = finalBlocksMap;
                     try {
@@ -2397,7 +2416,7 @@
                                                 'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
                                             });
                                             blk.groups.forEach(g => {
-                                                const sum = getGroupSummary(g);
+                                                const sum = getGroupSummary(g, blk.freeShipThreshold, blk.defaultShipping, cRate);
                                                 const baseCardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
                                                 const cashStr = g.cashReceiptMode === 'completed' ? '현영완료' : (g.cashReceiptMode === 'requested' ? '현영요청' : '');
                                                 const cardStr = [baseCardStr, cashStr].filter(Boolean).join(' / ');
@@ -2849,6 +2868,7 @@
                 if (!isLiveOn) {
                     staffFbDb.ref('ember_live_data/_portal_live_mode').set({
                         isLive: false,
+                        liveOwner: 'none',
                         lastClosedBroadcastName: cleanB,
                         updatedAt: Date.now()
                     }).catch(() => {});
@@ -2928,8 +2948,10 @@
                         cust.depositTotal += (Number(cust.shipping) || 0);
                     }
                 });
-                staffFbDb.ref('ember_live_data/_portal_live_mode').set({
+                staffFbDb.ref('ember_live_data/_portal_live_mode').update({
                     isLive: true,
+                    liveOwner: 'staff',
+                    activePollerTabId: myStaffPollerTabIdRef.current,
                     activeBroadcastName: cleanB,
                     updatedAt: Date.now()
                 }).catch(() => {});
@@ -2940,7 +2962,7 @@
                 staffFbDb.ref('ember_live_data/_portal_orders/__MAIN_LIVE__').set({
                     broadcastName: cleanB,
                     updatedAt: Date.now(),
-                    updatedBy: 'boss',
+                    updatedBy: 'staff_live',
                     customers: Object.values(byNick)
                 }).catch(() => {});
 
@@ -3598,7 +3620,7 @@
                             'VIP여부': '', '노쇼여부': '', '대기여부': '', '비밀번호': '', '주문확인': '', '입금내역JSON': '', '송장번호': ''
                         }];
                         (groupsArr || []).forEach(g => {
-                            const sum = getGroupSummary(g);
+                            const sum = getGroupSummary(g, fThresh, dShip, cRate);
                             const baseCardStr = g.cardMode === 'completed' ? `카드완료(${cRate}%)` : (g.cardMode === 'requested' ? `O(${cRate}%)` : '');
                             const cashStr = g.cashReceiptMode === 'completed' ? '현영완료' : (g.cashReceiptMode === 'requested' ? '현영요청' : '');
                             const cardStr = [baseCardStr, cashStr].filter(Boolean).join(' / ');
@@ -3750,6 +3772,7 @@
                     setIsSaving(false);
                 }
             }, [isSaving, activeGasUrl, activeStaffSheetId, activeDictSheetId, selectedTab, broadcastName, freeShipThreshold, defaultShipping, cardFeeRate, customerGroups, customerCredits, localBroadcastStore, getGroupSummary, showToast]);
+
             useEffect(() => {
                 const onKeyDown = (e) => {
                     if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S' || e.key === 'ㄴ')) {
@@ -3762,8 +3785,11 @@
                 return () => window.removeEventListener('keydown', onKeyDown);
             }, [handleSaveAll]);
 
-            // 주문서 내역(품목명, 수량, 단가, 완납, 카드, 노쇼, 대기 등)을 수정하면 즉시 로컬 스토어를 갱신하고 0.5초 뒤 자동으로 직원용 구글 시트('메인주문')와 고객 포털에 저장!
+            // 주문서 내역(품목명, 수량, 단가, 완납, 카드, 노쇼, 대기 등)을 수정하면 즉시 로컬 스토어를 갱신하고 0.25초 뒤 자동으로 직원용 구글 시트('메인주문')와 고객 포털에 저장!
             const updateCustomerGroup = useCallback((nick, updater) => {
+                try {
+                    localStorage.setItem(STAFF_LOCAL_DIRTY_TIME_KEY, String(Date.now()));
+                } catch (e) {}
                 setCustomerGroups(prev => {
                     const nextGroups = prev.map(g => g.nick === nick ? updater(g) : g);
                     const cleanBName = cleanDisplayTabName(broadcastName || selectedTab);
@@ -3792,7 +3818,7 @@
                     if (autoSaveOrdersTimerRef.current) clearTimeout(autoSaveOrdersTimerRef.current);
                     autoSaveOrdersTimerRef.current = setTimeout(() => {
                         saveUpdatedGroupsImmediately(nextGroups, '');
-                    }, 500);
+                    }, 250);
                     return nextGroups;
                 });
             }, [broadcastName, selectedTab, freeShipThreshold, defaultShipping, cardFeeRate, customerCredits, saveUpdatedGroupsImmediately]);
@@ -3988,7 +4014,7 @@
                                         '배송비': Number(blk.cardFeeRate) || 10, '입금액': 0
                                     });
                                     blk.groups.forEach(g => {
-                                        const sum = getGroupSummary(g);
+                                        const sum = getGroupSummary(g, blk.freeShipThreshold, blk.defaultShipping, blk.cardFeeRate);
                                         const cleanPh = fixPhoneNumber(g.phone);
                                         const pinStr = normalizePin4(g.pin) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : '');
                                         const depJson = Array.isArray(g.deposits) && g.deposits.length > 0 ? JSON.stringify(g.deposits) : '';
@@ -5539,29 +5565,37 @@
                                                             <button
                                                                 type="button"
                                                                 onClick={() => updateCustomerGroup(g.nick, cur => {
-                                                                    const isCurrentlyPaid = cur.deposit >= sum.baseGrand && sum.baseGrand > 0 && cur.cardMode === 'none';
+                                                                    const isCurrentlyPaid = !cur.isNoShow && cur.deposit >= sum.baseGrand && sum.baseGrand > 0 && cur.cardMode === 'none';
+                                                                    const nextPaidDeposit = isCurrentlyPaid ? 0 : sum.baseGrand;
                                                                     return {
                                                                         ...cur,
                                                                         cardMode: 'none',
-                                                                        deposit: isCurrentlyPaid ? 0 : sum.baseGrand
+                                                                        // ✨ 완납으로 바꾸는 순간 노쇼(isNoShow) 상태를 자동으로 즉시 해제(false)하여 다시 노쇼로 돌아가지 않도록 완벽 처리!
+                                                                        isNoShow: isCurrentlyPaid ? cur.isNoShow : false,
+                                                                        deposit: nextPaidDeposit
                                                                     };
                                                                 })}
                                                                 className={`px-2 py-0.5 rounded text-[11px] font-extrabold border ${
-                                                                    sum.isPaid && g.cardMode === 'none'
+                                                                    !g.isNoShow && sum.isPaid && g.cardMode === 'none'
                                                                         ? 'bg-emerald-600 text-white border-emerald-700'
                                                                         : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-100'
                                                                 }`}
                                                             >
-                                                                {sum.isPaid && g.cardMode === 'none' ? '완납됨' : '미납'}
+                                                                {!g.isNoShow && sum.isPaid && g.cardMode === 'none' ? '완납됨' : '미납'}
                                                             </button>
 
                                                             <div className="inline-flex rounded overflow-hidden border border-slate-300">
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => updateCustomerGroup(g.nick, cur => ({
-                                                                        ...cur,
-                                                                        cardMode: cur.cardMode === 'none' ? 'requested' : (cur.cardMode === 'requested' ? 'completed' : 'none')
-                                                                    }))}
+                                                                    onClick={() => updateCustomerGroup(g.nick, cur => {
+                                                                        const nextCardMode = cur.cardMode === 'none' ? 'requested' : (cur.cardMode === 'requested' ? 'completed' : 'none');
+                                                                        return {
+                                                                            ...cur,
+                                                                            cardMode: nextCardMode,
+                                                                            // 카드요청/카드완료로 바꿀 때도 노쇼 상태 자동 해제!
+                                                                            isNoShow: nextCardMode !== 'none' ? false : cur.isNoShow
+                                                                        };
+                                                                    })}
                                                                     className={`px-2 py-0.5 text-[11px] font-extrabold ${
                                                                         g.cardMode === 'completed' ? 'bg-purple-600 text-white' :
                                                                         g.cardMode === 'requested' ? 'bg-amber-500 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
@@ -5610,13 +5644,18 @@
 
                                                             <button
                                                                 type="button"
-                                                                onClick={() => openModal(`'${g.nick}' 배송비를 입력하세요.`, 'prompt', (val) => {
-                                                                    const num = Number(String(val).replace(/[^0-9]/g, '')) || 0;
-                                                                    updateCustomerGroup(g.nick, cur => ({ ...cur, shipping: num }));
-                                                                }, String(sum.ship), '배송비 수정')}
-                                                                className="px-2 py-0.5 rounded text-[11px] font-bold bg-white border border-slate-300 text-slate-600 hover:bg-slate-100"
+                                                                onClick={() => updateCustomerGroup(g.nick, cur => {
+                                                                    const nextNoShow = !cur.isNoShow;
+                                                                    return {
+                                                                        ...cur,
+                                                                        isNoShow: nextNoShow
+                                                                    };
+                                                                })}
+                                                                className={`px-2 py-0.5 rounded text-[11px] font-extrabold border ${
+                                                                    g.isNoShow ? 'bg-red-600 text-white border-red-700' : 'bg-white text-slate-400 border-slate-300 hover:text-red-600'
+                                                                }`}
                                                             >
-                                                                🚚 {sum.ship.toLocaleString()}원
+                                                                {g.isNoShow ? '🚨 노쇼됨 (클릭시해제)' : '노쇼'}
                                                             </button>
 
                                                             <button
@@ -5671,16 +5710,6 @@
 
                                                             <button
                                                                 type="button"
-                                                                onClick={() => updateCustomerGroup(g.nick, cur => ({ ...cur, isNoShow: !cur.isNoShow }))}
-                                                                className={`px-2 py-0.5 rounded text-[11px] font-extrabold border ${
-                                                                    g.isNoShow ? 'bg-red-600 text-white border-red-700' : 'bg-white text-slate-400 border-slate-300 hover:text-red-600'
-                                                                }`}
-                                                            >
-                                                                {g.isNoShow ? '🚨 노쇼됨' : '노쇼'}
-                                                            </button>
-
-                                                            <button
-                                                                type="button"
                                                                 onClick={() => openModal(`'${g.nick}' 님의 이 방송 주문 카드를 완전히 삭제하시겠습니까?`, 'confirm', () => {
                                                                     const nextGroups = customerGroups.filter(cur => cur.nick !== g.nick);
                                                                     setCustomerGroups(nextGroups);
@@ -5724,7 +5753,12 @@
                                                                 type="button"
                                                                 onClick={() => openModal(`'${g.nick}' 입금액 직접 수정`, 'prompt', (val) => {
                                                                     const num = Number(String(val).replace(/[^0-9]/g, '')) || 0;
-                                                                    updateCustomerGroup(g.nick, cur => ({ ...cur, deposit: num }));
+                                                                    updateCustomerGroup(g.nick, cur => ({
+                                                                        ...cur,
+                                                                        deposit: num,
+                                                                        // 입금액을 직접 입력했을 때도 0원보다 크면 자동으로 노쇼 해제!
+                                                                        isNoShow: num > 0 ? false : cur.isNoShow
+                                                                    }));
                                                                 }, String(sum.dep), '입금액 수정')}
                                                                 className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] flex items-center gap-1"
                                                             >
