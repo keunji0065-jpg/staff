@@ -89,9 +89,9 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 372; // 372 => v3.72
+        const VERSION_STEP = 375; // 375 => v3.75 (동명이인 주소 꼬임·오배송 원천 차단 패치)
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
-        const LAST_MODIFIED_DATE = "2026.11.03";
+        const LAST_MODIFIED_DATE = "2026.11.04";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzP4BvhxNoi0GbKZi1NTkrIxiqbZnL61MjjHIQi2NnyChrPF8Uk0An9XewdCoIJmSy7/exec';
         const DEFAULT_STAFF_SHEET_ID = '1sM5bkDqEjD6Kpxu2yoJe2aiMuqpcWLMAIGpY3iL5_x8';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
@@ -1362,8 +1362,10 @@
                 const handleMode = (snap) => {
                     const val = snap.val() || {};
                     if (val.liveOwner === 'boss' && val.isLive) {
+                        // 사장님이 생방송을 켜면 직원용은 즉시 유튜브 채팅 연결과 API 폴링을 완전히 중지하고 사장님께 모든 API 키 할당량을 양보!
                         setIsStaffActivePoller(false);
                         setIsLiveChatPaused(true);
+                        setLiveChatId(null);
                     } else if (val.activePollerTabId && val.activePollerTabId !== myStaffPollerTabIdRef.current && val.liveOwner === 'staff') {
                         setIsStaffActivePoller(false);
                     } else {
@@ -1404,6 +1406,7 @@
             const csGroupsRef = useRef(csGroups);
             const customerGroupsRef = useRef(customerGroups);
             const localBroadcastStoreRef = useRef(localBroadcastStore);
+            const syncedMasterAddrSigRef = useRef(new Set());
 
             useEffect(() => { csGroupsRef.current = csGroups; }, [csGroups]);
             useEffect(() => { customerGroupsRef.current = customerGroups; }, [customerGroups]);
@@ -2364,7 +2367,7 @@
                             }
                         });
 
-                        // ✨ 고객이 포털에서 입력한 최신 주소를 직원용 masterAddresses 사전과 사장님 마스터 시트('찐고객사전')에도 최신 1건으로 동기화!
+                        // ✨ 고객이 포털에서 입력한 최신 주소를 직원용 masterAddresses 사전과 사장님 마스터 시트('찐고객사전')에 동기화하되, 전화번호 뒷4자리가 다른 동명이인은 덮어쓰지 않고 각각 보존!
                         const allLatestAddrs = [];
                         Object.values(allVal).forEach(bMap => {
                             if (bMap && typeof bMap === 'object') {
@@ -2379,22 +2382,46 @@
                             setMasterAddresses(prev => {
                                 let mChanged = false;
                                 const map = new Map();
-                                prev.forEach(item => map.set(normalizeString(item.nickname), item));
+                                prev.forEach(item => {
+                                    const ph = fixPhoneNumber(item.phone || '');
+                                    const p4 = ph.length >= 4 ? ph.slice(-4) : '';
+                                    const key = p4 ? `${normalizeString(item.nickname)}___${p4}` : normalizeString(item.nickname);
+                                    map.set(key, item);
+                                });
                                 allLatestAddrs.forEach(item => {
-                                    const k = normalizeString(item.nickname);
-                                    const ex = map.get(k);
+                                    const kNorm = normalizeString(item.nickname);
                                     const cleanA = stripZipcode(item.address || item.baseAddress || '');
                                     const cleanP = fixPhoneNumber(item.phone || '');
+                                    const p4 = cleanP.length >= 4 ? cleanP.slice(-4) : '';
+                                    const mapKey = p4 ? `${kNorm}___${p4}` : kNorm;
+                                    const ex = map.get(mapKey);
                                     const cleanM = cleanMemoText(item.memo || '', cleanA);
                                     if (!ex || ex.address !== cleanA || ex.realname !== (item.realname || '') || ex.phone !== cleanP) {
                                         mChanged = true;
-                                        map.set(k, {
+                                        map.set(mapKey, {
                                             nickname: item.nickname,
                                             realname: item.realname || ex?.realname || '',
                                             phone: cleanP || ex?.phone || '',
                                             address: cleanA,
                                             memo: cleanM
                                         });
+                                        const sig = `${mapKey}|${item.realname || ''}|${cleanP}|${cleanA}|${cleanM}`;
+                                        if (cleanA && !syncedMasterAddrSigRef.current.has(sig)) {
+                                            syncedMasterAddrSigRef.current.add(sig);
+                                            fetchGas(activeGasUrl, {
+                                                action: 'save_master_address',
+                                                masterId: activeDictSheetId,
+                                                data: {
+                                                    nickname: item.nickname,
+                                                    realname: item.realname || '',
+                                                    phone: cleanP ? "'" + cleanP : '',
+                                                    address: cleanA,
+                                                    memo: cleanM,
+                                                    broadcastName: item.broadcastName || '',
+                                                    forceOverwrite: false
+                                                }
+                                            }).catch(() => {});
+                                        }
                                     }
                                 });
                                 if (mChanged) {
@@ -4589,20 +4616,58 @@
                             const newPin = cleanPh.length >= 4 ? cleanPh.slice(-4) : '';
                             const cleanBName = cleanDisplayTabName(broadcastName || selectedTab || '');
 
-                            if (staffFbDb && cleanBName && cleanA) {
+                            const addrPayload = {
+                                nickname: targetNick,
+                                realname: newAddr.realname || '',
+                                phone: cleanPh,
+                                address: cleanA,
+                                baseAddress: cleanA,
+                                memo: cleanM,
+                                broadcastName: cleanBName,
+                                updatedAt: new Date().toISOString()
+                            };
+
+                            if (staffFbDb && cleanA) {
                                 const safeBKey = cleanBName.replace(/[.#$\[\]\/]/g, '_');
                                 const safeNickKey = String(targetNick).replace(/[.#$\[\]\/]/g, '_');
                                 if (safeBKey && safeNickKey) {
-                                    staffFbDb.ref(`ember_live_data/_portal_broadcast_addresses/${safeBKey}/${safeNickKey}`).set({
+                                    staffFbDb.ref(`ember_live_data/_portal_broadcast_addresses/${safeBKey}/${safeNickKey}`).set(addrPayload).catch(() => {});
+                                }
+                                if (safeNickKey) {
+                                    staffFbDb.ref(`ember_live_data/_portal_master_addrs/${safeNickKey}`).set(addrPayload).catch(() => {});
+                                    staffFbDb.ref(`ember_live_data/_portal_addresses/${safeNickKey}`).set(addrPayload).catch(() => {});
+                                }
+                            }
+
+                            // ✨ 직원이 배송지를 직접 입력/수정했을 때도 사장님 마스터 시트('찐고객사전')와 로컬 주소록(masterAddresses)에 최신 1건으로 즉시 업데이트!
+                            if (cleanA) {
+                                setMasterAddresses(prev => {
+                                    const map = new Map();
+                                    prev.forEach(item => map.set(normalizeString(item.nickname), item));
+                                    map.set(normalizeString(targetNick), {
                                         nickname: targetNick,
                                         realname: newAddr.realname || '',
                                         phone: cleanPh,
                                         address: cleanA,
+                                        memo: cleanM
+                                    });
+                                    const merged = Array.from(map.values());
+                                    try { localStorage.setItem('ember_staff_master_addrs_v1', JSON.stringify(merged)); } catch (e) {}
+                                    return merged;
+                                });
+                                fetchGas(activeGasUrl, {
+                                    action: 'save_master_address',
+                                    masterId: activeDictSheetId,
+                                    data: {
+                                        nickname: targetNick,
+                                        realname: newAddr.realname || '',
+                                        phone: cleanPh ? "'" + cleanPh : '',
+                                        address: cleanA,
                                         memo: cleanM,
                                         broadcastName: cleanBName,
-                                        updatedAt: new Date().toISOString()
-                                    }).catch(() => {});
-                                }
+                                        forceOverwrite: true
+                                    }
+                                }).catch(() => {});
                             }
 
                             setCustomerGroups(prev => {
@@ -4615,7 +4680,7 @@
                                     pin: newPin || cur.pin
                                 } : cur);
 
-                                saveUpdatedGroupsImmediately(nextGroups, `✏️ '${targetNick}' 배송지가 직원용 시트와 고객 포털에 즉시 저장되었습니다!`);
+                                saveUpdatedGroupsImmediately(nextGroups, `✏️ '${targetNick}' 배송지가 직원용 시트 및 사장님 찐고객사전에 즉시 저장되었습니다!`);
                                 return nextGroups;
                             });
                             setAddrEditTarget(null);
@@ -6012,7 +6077,7 @@
                                                                 {g.memo && <span className="text-red-500 font-bold shrink-0">[{g.memo}]</span>}
                                                             </div>
                                                         ) : (() => {
-                                                            const dictMatch = findMasterAddressMatch(g.nick);
+                                                            const dictMatch = findMasterAddressMatch(g.nick, g.pin);
                                                             return (
                                                                 <div className="flex items-center gap-2 flex-wrap">
                                                                     <span className="text-red-500 font-bold flex items-center gap-1 text-[11px]">
@@ -6024,19 +6089,47 @@
                                                                             onClick={() => handleApplyMasterAddressToGroup(g.nick, dictMatch)}
                                                                             className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[11px] font-extrabold shadow-sm flex items-center gap-1"
                                                                         >
-                                                                            📗 찐고객사전 주소 자동채우기 ({dictMatch.realname})
+                                                                            📗 찐고객사전 주소 채우기 ({dictMatch.realname} · {fixPhoneNumber(dictMatch.phone).slice(-4)})
                                                                         </button>
                                                                     )}
                                                                 </div>
                                                             );
                                                         })()}
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => setAddrEditTarget(g)}
-                                                            className="px-2 sm:px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded font-bold text-[11px] shrink-0"
-                                                        >
-                                                            배송지 수정
-                                                        </button>
+                                                        <div className="flex items-center gap-1 shrink-0">
+                                                            {g.address && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => openModal(
+                                                                        `👤 '${g.nick}' 고객님이 기존 단골(${g.realname || '기존주소'})과 닉네임만 같은 [동명이인 새 고객]인가요?\n\n[확인]을 누르면 이 주문 카드에서 잘못 연결된 기존 단골 주소와 비밀번호를 깨끗이 비워서 오배송을 방지하고, 새 고객님이 포털에서 직접 본인 주소를 입력할 수 있게 초기화합니다!`,
+                                                                        'confirm',
+                                                                        () => {
+                                                                            const nextGroups = customerGroups.map(cur => cur.nick === g.nick ? {
+                                                                                ...cur,
+                                                                                realname: '',
+                                                                                phone: '',
+                                                                                address: '',
+                                                                                memo: '',
+                                                                                pin: '',
+                                                                                isConfirmed: false
+                                                                            } : cur);
+                                                                            setCustomerGroups(nextGroups);
+                                                                            saveUpdatedGroupsImmediately(nextGroups, `👤 '${g.nick}' 카드의 기존 단골 주소 연결을 해제했습니다! (새 고객 직접 입력 가능)`);
+                                                                        }
+                                                                    )}
+                                                                    className="px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded font-extrabold text-[11px]"
+                                                                    title="기존 단골과 닉네임이 같은 동명이인 새 고객일 때 클릭하면 잘못 들어간 주소를 비워 오배송을 막습니다"
+                                                                >
+                                                                    👤동명이인(주소비우기)
+                                                                </button>
+                                                            )}
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setAddrEditTarget(g)}
+                                                                className="px-2 sm:px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded font-bold text-[11px]"
+                                                            >
+                                                                배송지 수정
+                                                            </button>
+                                                        </div>
                                                     </div>
 
                                                     <div className="divide-y divide-slate-100 px-2 sm:px-3.5 py-1">
@@ -6095,6 +6188,58 @@
                                                                         />
                                                                         <span className="text-[9.5px] sm:text-[10px] text-slate-400 ml-0.5">원</span>
                                                                     </div>
+                                                                    {(g.items || []).length > 1 && (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => openModal(
+                                                                                `'${g.nick}' 고객님의 [${it.product}] 품목만 다른 배송지(예: 엄마, 동생, 사무실)로 따로 분리하시겠습니까?\n\n분리할 배송지 별칭(예: 엄마, 동생, 사무실)을 입력해 주세요:`,
+                                                                                'prompt',
+                                                                                (tagVal) => {
+                                                                                    const cleanTag = String(tagVal || '').trim().replace(/[()]/g, '');
+                                                                                    if (!cleanTag) return;
+                                                                                    const basePureNick = String(g.nick).replace(/\s*\([^)]+\)$/, '').trim();
+                                                                                    const splitNick = `${basePureNick}(${cleanTag})`;
+                                                                                    const remainItems = g.items.filter((_, i) => i !== idx);
+                                                                                    const splitItem = { ...it, id: `item_${Date.now()}_split` };
+
+                                                                                    const existingSplitIdx = customerGroups.findIndex(x => normalizeString(x.nick) === normalizeString(splitNick));
+                                                                                    let nextGroups = [];
+                                                                                    if (existingSplitIdx !== -1) {
+                                                                                        nextGroups = customerGroups.map((cur, cIdx) => {
+                                                                                            if (cur.nick === g.nick) return { ...cur, items: remainItems };
+                                                                                            if (cIdx === existingSplitIdx) return { ...cur, items: [...cur.items, splitItem] };
+                                                                                            return cur;
+                                                                                        });
+                                                                                    } else {
+                                                                                        const newSplitGroup = {
+                                                                                            ...g,
+                                                                                            nick: splitNick,
+                                                                                            address: '',
+                                                                                            memo: `[${cleanTag} 배송분]`,
+                                                                                            shipping: g.isVip ? 0 : defaultShipping,
+                                                                                            deposit: 0,
+                                                                                            trackingNumber: '',
+                                                                                            deposits: [],
+                                                                                            isConfirmed: false,
+                                                                                            items: [splitItem]
+                                                                                        };
+                                                                                        const origIdx = customerGroups.findIndex(x => x.nick === g.nick);
+                                                                                        nextGroups = [...customerGroups];
+                                                                                        nextGroups[origIdx] = { ...g, items: remainItems };
+                                                                                        nextGroups.splice(origIdx + 1, 0, newSplitGroup);
+                                                                                    }
+                                                                                    setCustomerGroups(nextGroups);
+                                                                                    saveUpdatedGroupsImmediately(nextGroups, `🔀 [${it.product}] 품목이 '${splitNick}' 별도 배송 카드로 분리되었습니다!`);
+                                                                                },
+                                                                                '엄마',
+                                                                                '다중배송 품목 분리 (엄마·동생·사무실 등)'
+                                                                            )}
+                                                                            className="px-1.5 py-0.5 rounded bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 text-[10px] font-extrabold shrink-0"
+                                                                            title="이 품목만 다른 배송지(엄마·동생·사무실 등)로 따로 보내기 위해 카드를 분리합니다"
+                                                                        >
+                                                                            ✂️분리
+                                                                        </button>
+                                                                    )}
                                                                     <button
                                                                         type="button"
                                                                         onClick={() => updateCustomerGroup(g.nick, cur => ({
