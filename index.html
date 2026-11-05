@@ -89,9 +89,9 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 375; // 375 => v3.75 (동명이인 주소 꼬임·오배송 원천 차단 패치)
+        const VERSION_STEP = 376; // 376 => v3.76 (사라진 방송 클라우드·마스터시트 자동복구 및 시트 증발 원천 차단 패치)
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
-        const LAST_MODIFIED_DATE = "2026.11.04";
+        const LAST_MODIFIED_DATE = "2026.11.05";
         const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzP4BvhxNoi0GbKZi1NTkrIxiqbZnL61MjjHIQi2NnyChrPF8Uk0An9XewdCoIJmSy7/exec';
         const DEFAULT_STAFF_SHEET_ID = '1sM5bkDqEjD6Kpxu2yoJe2aiMuqpcWLMAIGpY3iL5_x8';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
@@ -1407,6 +1407,15 @@
             const customerGroupsRef = useRef(customerGroups);
             const localBroadcastStoreRef = useRef(localBroadcastStore);
             const syncedMasterAddrSigRef = useRef(new Set());
+            const isInitialSheetLoadedRef = useRef(false);
+            const explicitlyDeletedTabsRef = useRef((() => {
+                try {
+                    const saved = localStorage.getItem('ember_staff_deleted_tabs_v1');
+                    return saved ? new Set(JSON.parse(saved)) : new Set();
+                } catch (e) {
+                    return new Set();
+                }
+            })());
 
             useEffect(() => { csGroupsRef.current = csGroups; }, [csGroups]);
             useEffect(() => { customerGroupsRef.current = customerGroups; }, [customerGroups]);
@@ -1626,14 +1635,6 @@
                         });
 
                     if (allCombinedRows.length > 0) {
-                        allCombinedRows.push({
-                            '닉네임': '___WORKSPACE_META___',
-                            '상품명': '오늘의방송',
-                            '수량': 70000,
-                            '단가(제품금액)': 4000,
-                            '배송비': 10,
-                            '입금액': 0
-                        });
                         pendingOrdersRowsRef.current = allCombinedRows;
                         flushOrdersQueueToSheet();
                     }
@@ -1850,30 +1851,31 @@
                             convertedToCredit: Boolean(convertedToCredit),
                             shipping: shipNum,
                             deposit: depNum,
-                            csFeePaid: depNum > 0 && depNum >= shipNum,
+                            csFeePaid: shipNum > 0 && depNum >= shipNum,
                             cardMode: cardMode,
                             items: parsedItems
                         };
                     }).filter(c => c.nick);
                     setCsGroups(parsed);
+                    csGroupsRef.current = parsed;
+                    try { localStorage.setItem('ember_staff_cs_groups_v1', JSON.stringify(parsed)); } catch (e) {}
                     syncCsGroupsToFirebase(parsed);
                 } catch (e) {}
-            }, [activeGasUrl, activeStaffSheetId]);
+            }, [activeGasUrl, activeStaffSheetId, saveCsOrdersToSheetImmediate]);
 
             const loadMasterAddresses = useCallback(async () => {
                 try {
-                    // 1순위: 직통 리더(gviz)로 사장님 마스터 시트의 '찐고객사전' 탭을 0.5초 만에 직접 읽어와 시트 수정/삭제 사항 즉시 반영!
-                    const directRows = await fetchGoogleSheetDirect(activeDictSheetId, '찐고객사전');
-                    const directList = [];
-                    if (Array.isArray(directRows)) {
-                        directRows.forEach(a => {
+                    const directAddrRows = await fetchGoogleSheetDirect(activeDictSheetId, '찐고객사전');
+                    if (Array.isArray(directAddrRows) && directAddrRows.length > 0) {
+                        const directList = [];
+                        directAddrRows.forEach(a => {
                             const nick = String(pickRowField(a, ['닉네임', 'nickname', '주문자', '고객명'], 0)).trim();
                             const realname = String(pickRowField(a, ['수령인명', 'realname', '수령인', '이름', '성명'], 1)).trim();
                             const phone = fixPhoneNumber(pickRowField(a, ['연락처', 'phone', '전화번호', '핸드폰번호'], 2));
                             const address = stripZipcode(pickRowField(a, ['주소', 'address', '배송지'], 3));
                             const rawMemo = String(pickRowField(a, ['배송메모', 'memo', '요청사항', '메모'], 4)).trim();
                             const memo = cleanMemoText(/^\d{5}$/.test(rawMemo) ? pickRowField(a, ['col_5'], 5) : rawMemo, address);
-                            if (nick.toLowerCase() === 'nickname' || nick === '닉네임' || realname.toLowerCase() === 'realname') return;
+                            if (nick.toLowerCase() === 'nickname' || nick === '닉네임') return;
                             if ((nick || realname) && address) {
                                 directList.push({ nickname: nick || realname, realname, phone, address, memo });
                             }
@@ -1882,6 +1884,36 @@
                             setMasterAddresses(directList);
                             try { localStorage.setItem('ember_staff_master_addrs_v1', JSON.stringify(directList)); } catch (e) {}
                         }
+                    }
+
+                    // ✨ 사장님 마스터 시트의 '고객상태관리' 탭도 직통(gviz)으로 0.5초 만에 읽어와 차감된 적립금·VIP 상태를 즉시 반영!
+                    const directCustRows = await fetchGoogleSheetDirect(activeDictSheetId, '고객상태관리');
+                    if (Array.isArray(directCustRows) && directCustRows.length > 0) {
+                        const directCredits = {};
+                        const directVips = {};
+                        directCustRows.forEach(c => {
+                            const n = String(pickRowField(c, ['닉네임', 'nickname'], 0)).trim();
+                            if (!n || n === '닉네임' || n.toLowerCase() === 'nickname') return;
+                            if (n === '___SYSTEM_YT_API_KEY___') {
+                                const savedKey = String(pickRowField(c, ['고객상태', '비밀번호'], 1)).trim();
+                                if (savedKey) {
+                                    setSharedYtApiKey(savedKey);
+                                    try { localStorage.setItem('default_youtubeApiKey', JSON.stringify(savedKey)); } catch (e) {}
+                                }
+                                return;
+                            }
+                            const st = String(pickRowField(c, ['고객상태', 'status'], 1)).trim().toLowerCase();
+                            const rawCredStr = String(pickRowField(c, ['적립금', 'credit'], 5) ?? '').trim();
+                            const cred = Number(rawCredStr.replace(/[^0-9.-]/g, '')) || 0;
+                            if (st === 'vip' || st === 'manager' || st === '관리자') {
+                                directVips[normalizeString(n)] = true;
+                                const hKey = normalizeHandleNick(n);
+                                if (hKey) directVips[hKey] = true;
+                            }
+                            directCredits[n] = Math.max(0, cred);
+                        });
+                        setVipNickMap(directVips);
+                        setCustomerCredits(directCredits);
                     }
 
                     const res = await fetchGas(`${activeGasUrl}?action=get_all&depId=${DEFAULT_DEP_SHEET_ID}&masterId=${activeDictSheetId}&skipHeavy=false&t=${Date.now()}`);
@@ -1932,16 +1964,13 @@
                                 const hKey = normalizeHandleNick(n);
                                 if (hKey) sheetVips[hKey] = true;
                             }
-                            if (n && cred >= 0 && c['적립금'] !== '' && c['적립금'] !== undefined) {
-                                sheetCredits[n] = cred;
+                            if (n && n !== '닉네임') {
+                                sheetCredits[n] = Math.max(0, cred);
                             }
                         });
-                        if (Object.keys(sheetVips).length > 0) {
-                            setVipNickMap(prev => ({ ...prev, ...sheetVips }));
-                        }
-                        if (Object.keys(sheetCredits).length > 0) {
-                            setCustomerCredits(prev => ({ ...sheetCredits, ...prev }));
-                        }
+                        setVipNickMap(sheetVips);
+                        // ✨ 중요: 이전 캐시(...prev)가 시트의 줄어든 적립금(...sheetCredits)을 덮어쓰지 않도록 시트 원본 값으로 즉시 교체!
+                        setCustomerCredits(sheetCredits);
                     }
 
                     if (incoming.length > 0) {
@@ -2071,24 +2100,100 @@
                     delete discoveredBlocks['주문_10/24 라이브'];
                     delete discoveredBlocks['10/24 라이브'];
 
-                    // 🧹 시트에서 삭제된 방송이 파이어베이스(_portal_orders)에 남아있다면 정리하되, 현재 진행 중인 생방송(__MAIN_LIVE__)은 절대 건드리지 않고 100% 보호!
+                    // 🚑 [핵심 자동 복구] 만약 직원용 구글 시트('메인주문')에서 특정 방송(예: 11/04 피옴보)이 다른 탭의 덮어쓰기로 인해 사라졌더라도,
+                    // 파이어베이스 클라우드(_portal_orders)나 사장님 마스터 시트(주문_... 탭)에 남아있다면 절대 지우지 않고 즉시 직원용 화면과 시트로 100% 자동 복구합니다!
+                    let recoveredFromCloudCount = 0;
                     if (staffFbDb) {
                         try {
                             const fbOrdersSnap = await staffFbDb.ref('ember_live_data/_portal_orders').once('value');
                             const fbOrdersVal = fbOrdersSnap.val() || {};
                             Object.keys(fbOrdersVal).forEach(safeKey => {
-                                if (safeKey === '__MAIN_LIVE__') {
-                                    return;
-                                }
+                                if (safeKey === '__MAIN_LIVE__') return;
                                 const node = fbOrdersVal[safeKey];
-                                const cleanB = cleanDisplayTabName(node?.broadcastName || safeKey);
+                                if (!node || !Array.isArray(node.customers) || node.customers.length === 0) return;
+                                const cleanB = cleanDisplayTabName(node.broadcastName || safeKey);
+                                if (!cleanB || ['10/24 라이브', '오늘의방송', '기본방송', '메인주문'].includes(cleanB)) return;
                                 const tabKey = '주문_' + cleanB;
-                                if (!discoveredBlocks[tabKey] && node?.updatedBy !== 'staff') {
-                                    staffFbDb.ref(`ember_live_data/_portal_orders/${safeKey}`).remove().catch(() => {});
+                                if (explicitlyDeletedTabsRef.current.has(tabKey)) return;
+
+                                if (!discoveredBlocks[tabKey]) {
+                                    let fThresh = 70000;
+                                    let cRate = 10;
+                                    const restoredGroups = node.customers.map((cust, cIdx) => {
+                                        if (cust.freeShippingThreshold !== undefined) fThresh = Number(cust.freeShippingThreshold);
+                                        if (cust.cardFeeRate !== undefined) cRate = Number(cust.cardFeeRate) || 10;
+                                        const cardRaw = String(cust.isCard || '').trim();
+                                        const cardOnly = cardRaw.replace(/현영완료|현영요청|현영/g, '').replace(/\//g, '').trim();
+                                        const cardMode = cardOnly.includes('완료') ? 'completed' : ((cardOnly.startsWith('O') || cardOnly.includes('카드') || cust.isCard === true) ? 'requested' : 'none');
+                                        const cashReceiptMode = (cust.cashReceipt === 'completed' || cardRaw.includes('현영완료')) ? 'completed' : ((cust.cashReceipt === 'requested' || cardRaw.includes('현영')) ? 'requested' : 'none');
+                                        const addrObj = cust.address || {};
+                                        const fullAddr = stripZipcode(`${addrObj.baseAddress || ''} ${addrObj.detailAddress || ''}`.trim());
+                                        const cleanPh = fixPhoneNumber(addrObj.phone || '');
+                                        const trk = Array.isArray(cust.trackingNumbers) && cust.trackingNumbers.length > 0 ? String(cust.trackingNumbers[0]).trim() : '';
+                                        return {
+                                            nick: String(cust.nickname || '').trim(),
+                                            realname: addrObj.realname || '',
+                                            phone: cleanPh,
+                                            address: fullAddr,
+                                            memo: cleanMemoText(addrObj.memo || '', fullAddr),
+                                            shipping: cust.shipping !== undefined ? Number(cust.shipping) : 4000,
+                                            deposit: Number(cust.depositTotal) || 0,
+                                            cardMode,
+                                            cashReceiptMode,
+                                            isVip: Boolean(cust.isVip),
+                                            isNoShow: Boolean(cust.isNoShow),
+                                            isConfirmed: Boolean(cust.isConfirmed),
+                                            pin: normalizePin4(cust.phoneLast4) || (cleanPh.length >= 4 ? cleanPh.slice(-4) : ''),
+                                            trackingNumber: trk,
+                                            deposits: Array.isArray(cust.deposits) ? cust.deposits : [],
+                                            showDeposits: false,
+                                            items: (Array.isArray(cust.items) ? cust.items : []).map((it, iIdx) => ({
+                                                id: `item_rec_${cIdx}_${iIdx}_${Date.now()}`,
+                                                product: it.product || '',
+                                                qty: Number(it.qty) || 1,
+                                                price: Number(it.price) || 0,
+                                                isWaitlist: Boolean(it.isWaitlist),
+                                                waitlistOrder: Number(it.waitlistOrder) || 0
+                                            }))
+                                        };
+                                    }).filter(g => g.nick && g.items.length > 0);
+
+                                    if (restoredGroups.length > 0) {
+                                        discoveredBlocks[tabKey] = {
+                                            broadcastName: cleanB,
+                                            freeShipThreshold: fThresh,
+                                            defaultShipping: 4000,
+                                            cardFeeRate: cRate,
+                                            updatedAt: node.updatedAt || Date.now(),
+                                            groups: restoredGroups
+                                        };
+                                        recoveredFromCloudCount++;
+                                    }
                                 }
                             });
                         } catch (cleanErr) {}
                     }
+
+                    // 🚑 [2차 자동 복구] 사장님 마스터 시트(activeDictSheetId)에 마감 저장된 '주문_...' 탭들 중 누락된 최근 방송이 있으면 자동으로 가져와 복구!
+                    try {
+                        const masterTabsRes = await fetchGas(`${activeGasUrl}?action=get_order_tabs&masterId=${activeDictSheetId}&t=${Date.now()}`, null, 10000).catch(() => null);
+                        const masterTabs = Array.isArray(masterTabsRes?.tabs) ? masterTabsRes.tabs.slice(0, 8) : [];
+                        for (const mTab of masterTabs) {
+                            const cleanM = cleanDisplayTabName(mTab);
+                            if (!cleanM || ['10/24 라이브', '오늘의방송', '기본방송', '메인주문'].includes(cleanM)) continue;
+                            const tabKey = '주문_' + cleanM;
+                            if (explicitlyDeletedTabsRef.current.has(tabKey) || discoveredBlocks[tabKey]) continue;
+
+                            const mRows = await fetchGoogleSheetDirect(activeDictSheetId, mTab);
+                            if (Array.isArray(mRows) && mRows.length > 0) {
+                                const parsedM = parseRowsIntoBroadcastBlocks(mRows, mTab);
+                                if (parsedM[tabKey] && parsedM[tabKey].groups?.length > 0) {
+                                    discoveredBlocks[tabKey] = parsedM[tabKey];
+                                    recoveredFromCloudCount++;
+                                }
+                            }
+                        }
+                    } catch (mErr) {}
 
                     // ✨ 고객이 셀프 포털에서 방금 입력한 배송지(_portal_broadcast_addresses)와 주문확정(_portal_confirmed) 내역을 모든 방송 블록에 즉시 병합!
                     if (staffFbDb && Object.keys(discoveredBlocks).length > 0) {
@@ -2177,9 +2282,13 @@
 
                     setLocalBroadcastStore(finalBlocksMap);
                     localBroadcastStoreRef.current = finalBlocksMap;
+                    isInitialSheetLoadedRef.current = true;
                     try {
                         localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(finalBlocksMap));
                     } catch (e) {}
+                    if (recoveredFromCloudCount > 0) {
+                        showToast(`🚑 누락되었던 방송 ${recoveredFromCloudCount}건을 클라우드/마스터시트에서 자동 복구했습니다!`);
+                    }
 
                     // 이전 마감 방송들에 들어있는 모든 고객 배송지도 masterAddresses 사전에 자동 흡수하여 라이브 주문 시 100% 자동 매칭되도록 강화!
                     const extractedPastAddrs = [];
@@ -2261,6 +2370,37 @@
                 loadInitialTabs(false);
                 loadCsOrders();
                 loadMasterAddresses();
+                // 사장님 시트에서 적립금이나 주소록이 수정되었을 때 직원용에서도 12초마다 자동 동기화
+                const dictTimer = setInterval(() => {
+                    if (!document.hidden) loadMasterAddresses();
+                }, 12000);
+                return () => clearInterval(dictTimer);
+            }, [loadMasterAddresses]);
+
+            // ✨ 사장님 주문서에서 적립금을 차감하거나 수정했을 때 파이어베이스(_portal_credits)를 통해 0.1초 만에 직원용 화면에도 즉시 반영!
+            useEffect(() => {
+                if (!staffFbDb) return;
+                const credRef = staffFbDb.ref('ember_live_data/_portal_credits');
+                const handleCredSnap = (snap) => {
+                    const val = snap.val();
+                    if (!val || typeof val !== 'object') return;
+                    setCustomerCredits(prev => {
+                        let changed = false;
+                        const next = { ...prev };
+                        Object.values(val).forEach(entry => {
+                            if (entry && entry.nickname !== undefined) {
+                                const newAmt = Math.max(0, Number(entry.credit) || 0);
+                                if (next[entry.nickname] !== newAmt) {
+                                    next[entry.nickname] = newAmt;
+                                    changed = true;
+                                }
+                            }
+                        });
+                        return changed ? next : prev;
+                    });
+                };
+                credRef.on('value', handleCredSnap);
+                return () => credRef.off('value', handleCredSnap);
             }, []);
 
             // ✨ [핵심] 고객이 포털에서 주소를 입력하거나 주문확정을 눌렀을 때 현재 보고 있는 방송뿐만 아니라 모든 방송 창고(localBroadcastStore)에 실시간으로 자동 반영!
@@ -2434,7 +2574,8 @@
                         }
 
                         // ✨ 핵심: 고객이 포털에서 주소를 입력해 로컬 스토어가 변경되면 즉시 직원용 구글 시트('메인주문')에도 백그라운드로 자동 저장!
-                        if (storeChanged) {
+                        // 🛡️ 단, 아직 초기 시트 로딩(isInitialSheetLoadedRef.current)이 끝나지 않은 상태에서 덮어쓰면 다른 방송이 날아갈 수 있으므로 로딩 완료 후에만 저장!
+                        if (storeChanged && isInitialSheetLoadedRef.current) {
                             localBroadcastStoreRef.current = nextStore;
                             try { localStorage.setItem(STAFF_LOCAL_STORE_KEY, JSON.stringify(nextStore)); } catch (e) {}
                             if (autoSaveOrdersTimerRef.current) clearTimeout(autoSaveOrdersTimerRef.current);
@@ -2505,14 +2646,6 @@
                                         }
                                     });
                                 if (allCombinedRows.length > 0) {
-                                    allCombinedRows.push({
-                                        '닉네임': '___WORKSPACE_META___',
-                                        '상품명': '오늘의방송',
-                                        '수량': 70000,
-                                        '단가(제품금액)': 4000,
-                                        '배송비': 10,
-                                        '입금액': 0
-                                    });
                                     pendingOrdersRowsRef.current = allCombinedRows;
                                     flushOrdersQueueToSheet();
                                 }
@@ -3756,15 +3889,6 @@
                     // 구글 시트 Lock 충돌 방지를 위해 순차적으로 빠르게 저장 (save_orders에 이미 송장번호 R열이 전부 포함되어 있으므로 중복 save_tracking_numbers 제거!)
                     let resOrders = { success: true };
                     if (allCombinedRows.length > 0) {
-                        // Code.gs의 preservedRows(삭제한 방송을 시트 맨 밑에 다시 복원하는 구버전 로직)를 무력화하기 위한 마커 행 추가
-                        allCombinedRows.push({
-                            '닉네임': '___WORKSPACE_META___',
-                            '상품명': '오늘의방송',
-                            '수량': 70000,
-                            '단가(제품금액)': 4000,
-                            '배송비': 10,
-                            '입금액': 0
-                        });
                         resOrders = await fetchGas(activeGasUrl, {
                             action: 'save_orders',
                             masterId: activeStaffSheetId,
@@ -4048,6 +4172,10 @@
                     `[${cleanTarget}] 방송 전체 주문 내역을 완전히 삭제하시겠습니까?\n(삭제 즉시 직원용 시트와 고객용 주문확인 포털에서도 흔적 없이 사라집니다)`,
                     'confirm',
                     () => {
+                        explicitlyDeletedTabsRef.current.add(tabKey);
+                        try {
+                            localStorage.setItem('ember_staff_deleted_tabs_v1', JSON.stringify(Array.from(explicitlyDeletedTabsRef.current)));
+                        } catch (e) {}
                         const nextStore = { ...localBroadcastStoreRef.current };
                         delete nextStore[tabKey];
                         delete nextStore[targetTabToDelete];
