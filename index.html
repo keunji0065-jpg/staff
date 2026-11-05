@@ -89,10 +89,10 @@
         }
 
         // 버전 관리 규칙: 소수점 뒷자리가 99를 넘으면 앞자리가 +1 증가 (예: v2.99 -> v3.00)
-        const VERSION_STEP = 376; // 376 => v3.76 (사라진 방송 클라우드·마스터시트 자동복구 및 시트 증발 원천 차단 패치)
+        const VERSION_STEP = 378; // 378 => v3.78 (2026.11.05 최신 스크립트 URL 반영)
         const APP_VERSION = `v${Math.floor(VERSION_STEP / 100)}.${String(VERSION_STEP % 100).padStart(2, '0')}`;
         const LAST_MODIFIED_DATE = "2026.11.05";
-        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzP4BvhxNoi0GbKZi1NTkrIxiqbZnL61MjjHIQi2NnyChrPF8Uk0An9XewdCoIJmSy7/exec';
+        const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbyxSODU9tlyw1RaB-jVTlon7m-5W19FEeiAxVda40CV9uVoJA07LlgR7DqwP7XAXTBq/exec';
         const DEFAULT_STAFF_SHEET_ID = '1sM5bkDqEjD6Kpxu2yoJe2aiMuqpcWLMAIGpY3iL5_x8';
         const DEFAULT_MASTER_SHEET_ID = '1B8SBMX18_Px1CpRHuDTxqodqudiTrf6NfVoptjHtnGQ';
         const DEFAULT_DEP_SHEET_ID = '14bx2HMd_NID3zQN-Hb0x0At2Qmti7-p1Zfx1ZadNScY';
@@ -1354,22 +1354,31 @@
             const unsavedLiveChatsRef = useRef([]);
             const myStaffPollerTabIdRef = useRef(`staff_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
             const [isStaffActivePoller, setIsStaffActivePoller] = useState(true);
+            const [isBossLiveNow, setIsBossLiveNow] = useState(false);
+            const [bossActiveBroadcastName, setBossActiveBroadcastName] = useState('');
 
-            // 🛡️ 사장님 주문서에서 방송을 시작했거나 다른 직원 탭에서 연결했을 때 중복 유튜브 API 호출을 자동 차단!
+            // 🛡️ 사장님 주문서에서 방송을 시작했거나 다른 직원 탭에서 연결했을 때 중복 유튜브 API 호출 및 라이브 주문서 사용을 자동 차단!
             useEffect(() => {
                 if (!staffFbDb) return;
                 const modeRef = staffFbDb.ref('ember_live_data/_portal_live_mode');
                 const handleMode = (snap) => {
                     const val = snap.val() || {};
                     if (val.liveOwner === 'boss' && val.isLive) {
-                        // 사장님이 생방송을 켜면 직원용은 즉시 유튜브 채팅 연결과 API 폴링을 완전히 중지하고 사장님께 모든 API 키 할당량을 양보!
+                        // 사장님이 생방송을 켜면 직원용은 즉시 유튜브 채팅 연결과 API 폴링, 라이브 주문서 작성을 완전히 잠그고 사장님께 모든 권한을 양보!
+                        setIsBossLiveNow(true);
+                        setBossActiveBroadcastName(val.activeBroadcastName || '사장님 생방송');
                         setIsStaffActivePoller(false);
+                        setIsStaffLiveActive(false);
                         setIsLiveChatPaused(true);
                         setLiveChatId(null);
-                    } else if (val.activePollerTabId && val.activePollerTabId !== myStaffPollerTabIdRef.current && val.liveOwner === 'staff') {
-                        setIsStaffActivePoller(false);
                     } else {
-                        setIsStaffActivePoller(true);
+                        setIsBossLiveNow(false);
+                        setBossActiveBroadcastName('');
+                        if (val.activePollerTabId && val.activePollerTabId !== myStaffPollerTabIdRef.current && val.liveOwner === 'staff') {
+                            setIsStaffActivePoller(false);
+                        } else {
+                            setIsStaffActivePoller(true);
+                        }
                     }
                 };
                 modeRef.on('value', handleMode);
@@ -2234,7 +2243,9 @@
                                             const newAddrStr = stripZipcode(matchedAddr.address || `${matchedAddr.baseAddress || ''} ${matchedAddr.detailAddress || ''}`.trim());
                                             const newReal = matchedAddr.realname || g.realname;
                                             const newPh = fixPhoneNumber(matchedAddr.phone || g.phone);
-                                            const newMemo = cleanMemoText(matchedAddr.memo ?? g.memo, newAddrStr);
+                                            const lbl = (matchedAddr.addressLabel && matchedAddr.addressLabel !== '우리집' && matchedAddr.addressLabel !== '기본') ? matchedAddr.addressLabel : '';
+                                            const baseMemo = cleanMemoText(matchedAddr.memo ?? g.memo, newAddrStr);
+                                            const newMemo = (lbl && !baseMemo.includes(`[${lbl}]`)) ? (baseMemo ? `[${lbl}] ${baseMemo}` : `[${lbl}]`) : baseMemo;
                                             if (newAddrStr) {
                                                 updatedG = {
                                                     ...updatedG,
@@ -2438,7 +2449,9 @@
                                         const newAddrStr = stripZipcode(matched.address || `${matched.baseAddress || ''} ${matched.detailAddress || ''}`.trim());
                                         const newReal = matched.realname || g.realname;
                                         const newPh = fixPhoneNumber(matched.phone || g.phone);
-                                        const newMemo = cleanMemoText(matched.memo ?? g.memo, newAddrStr);
+                                        const lbl = (matched.addressLabel && matched.addressLabel !== '우리집' && matched.addressLabel !== '기본') ? matched.addressLabel : '';
+                                        const baseMemo = cleanMemoText(matched.memo ?? g.memo, newAddrStr);
+                                        const newMemo = (lbl && !baseMemo.includes(`[${lbl}]`)) ? (baseMemo ? `[${lbl}] ${baseMemo}` : `[${lbl}]`) : baseMemo;
                                         if (newAddrStr && (g.address !== newAddrStr || g.realname !== newReal || g.phone !== newPh || g.memo !== newMemo)) {
                                             changed = true;
                                             return {
@@ -2487,7 +2500,9 @@
                                 const newAddrStr = stripZipcode(matched.address || `${matched.baseAddress || ''} ${matched.detailAddress || ''}`.trim());
                                 const newReal = matched.realname || g.realname;
                                 const newPh = fixPhoneNumber(matched.phone || g.phone);
-                                const newMemo = cleanMemoText(matched.memo ?? g.memo, newAddrStr);
+                                const lbl = (matched.addressLabel && matched.addressLabel !== '우리집' && matched.addressLabel !== '기본') ? matched.addressLabel : '';
+                                const baseMemo = cleanMemoText(matched.memo ?? g.memo, newAddrStr);
+                                const newMemo = (lbl && !baseMemo.includes(`[${lbl}]`)) ? (baseMemo ? `[${lbl}] ${baseMemo}` : `[${lbl}]`) : baseMemo;
                                 if (newAddrStr && (g.address !== newAddrStr || g.realname !== newReal || g.phone !== newPh || g.memo !== newMemo)) {
                                     blkChanged = true;
                                     return {
@@ -2545,23 +2560,6 @@
                                             address: cleanA,
                                             memo: cleanM
                                         });
-                                        const sig = `${mapKey}|${item.realname || ''}|${cleanP}|${cleanA}|${cleanM}`;
-                                        if (cleanA && !syncedMasterAddrSigRef.current.has(sig)) {
-                                            syncedMasterAddrSigRef.current.add(sig);
-                                            fetchGas(activeGasUrl, {
-                                                action: 'save_master_address',
-                                                masterId: activeDictSheetId,
-                                                data: {
-                                                    nickname: item.nickname,
-                                                    realname: item.realname || '',
-                                                    phone: cleanP ? "'" + cleanP : '',
-                                                    address: cleanA,
-                                                    memo: cleanM,
-                                                    broadcastName: item.broadcastName || '',
-                                                    forceOverwrite: false
-                                                }
-                                            }).catch(() => {});
-                                        }
                                     }
                                 });
                                 if (mChanged) {
@@ -2759,6 +2757,74 @@
                 return () => refAccRef.off('value', handleAccountUpdate);
             }, []);
 
+            // ✨ 고객이 포털에서 일부 상품만 다른 배송지(엄마·동생·사무실 등)로 분리 신청했을 때 직원용 화면에도 실시간 반영!
+            useEffect(() => {
+                if (!staffFbDb) return;
+                const splitsRef = staffFbDb.ref('ember_live_data/_portal_splits');
+                const processedIds = new Set();
+                const handleSplits = (snap) => {
+                    const val = snap.val();
+                    if (!val || typeof val !== 'object') return;
+                    const cleanCurB = cleanDisplayTabName(broadcastName || selectedTab || '');
+                    Object.values(val).forEach(sp => {
+                        if (!sp || !sp.id || processedIds.has(sp.id)) return;
+                        if (sp.createdAt && Date.now() - sp.createdAt > 60000) {
+                            processedIds.add(sp.id);
+                            return;
+                        }
+                        const spBName = cleanDisplayTabName(sp.broadcastName || '');
+                        if (spBName && cleanCurB && normalizeString(spBName) !== normalizeString(cleanCurB)) return;
+                        processedIds.add(sp.id);
+
+                        setCustomerGroups(prev => {
+                            const origIdx = prev.findIndex(g => normalizeString(g.nick) === normalizeString(sp.originalNickname));
+                            if (origIdx === -1) return prev;
+                            const origGroup = prev[origIdx];
+                            const newSplitGroup = {
+                                ...origGroup,
+                                nick: sp.splitNickname,
+                                realname: sp.address?.realname || origGroup.realname || '',
+                                phone: fixPhoneNumber(sp.address?.phone || origGroup.phone || ''),
+                                address: stripZipcode(sp.address?.baseAddress || ''),
+                                memo: sp.address?.memo || '',
+                                shipping: sp.splitShipping !== undefined ? Number(sp.splitShipping) : origGroup.shipping,
+                                deposit: 0,
+                                pin: normalizePin4(sp.phoneLast4) || origGroup.pin,
+                                trackingNumber: '',
+                                deposits: [],
+                                isConfirmed: true,
+                                items: (sp.splitItems || []).map((it, idx) => ({
+                                    id: `item_${Date.now()}_sp_${idx}`,
+                                    product: it.product || '',
+                                    qty: Number(it.qty) || 1,
+                                    price: Number(it.price) || 0,
+                                    isWaitlist: Boolean(it.isWaitlist),
+                                    waitlistOrder: Number(it.waitlistOrder) || 0
+                                }))
+                            };
+                            const updatedOrig = {
+                                ...origGroup,
+                                shipping: sp.remainShipping !== undefined ? Number(sp.remainShipping) : origGroup.shipping,
+                                items: (sp.remainItems || []).map((it, idx) => ({
+                                    id: `item_${Date.now()}_rem_${idx}`,
+                                    product: it.product || '',
+                                    qty: Number(it.qty) || 1,
+                                    price: Number(it.price) || 0,
+                                    isWaitlist: Boolean(it.isWaitlist),
+                                    waitlistOrder: Number(it.waitlistOrder) || 0
+                                }))
+                            };
+                            const next = [...prev];
+                            next[origIdx] = updatedOrig;
+                            next.splice(origIdx + 1, 0, newSplitGroup);
+                            return next;
+                        });
+                    });
+                };
+                splitsRef.on('value', handleSplits);
+                return () => splitsRef.off('value', handleSplits);
+            }, [broadcastName, selectedTab]);
+
             // 🎥 직원용 라이브 주문서: 사장님 시트 공유 API 키 및 실시간재고 동기화
             useEffect(() => {
                 if (!staffFbDb) return;
@@ -2833,6 +2899,9 @@
 
             const handleConnectYoutubeLive = async (e) => {
                 if (e) e.preventDefault();
+                if (isBossLiveNow) {
+                    return openModal(`🚨 현재 사장님 주문서에서 [${bossActiveBroadcastName}] 생방송이 진행 중입니다!\n\n유튜브 API 할당량 보호 및 주문서 충돌 방지를 위해 사장님 생방송 중에는 직원용 라이브 주문서를 연결할 수 없습니다.`);
+                }
                 const vid = extractYtId(liveYoutubeUrl);
                 if (!vid || vid.length !== 11) {
                     return openModal('유튜브 라이브 영상 주소(URL)를 정확히 입력해 주세요.');
@@ -3050,7 +3119,7 @@
 
             // 직원이 라이브 주문표를 수정할 때마다 고객용 셀프 포털(__MAIN_LIVE__)에 실시간 미러링
             const syncStaffLiveRowsToPortal = useCallback((rowsToSync, bTitle, isLiveOn) => {
-                if (!staffFbDb) return;
+                if (!staffFbDb || isBossLiveNow) return;
                 const cleanB = cleanDisplayTabName(bTitle || '오늘의방송');
                 if (!isLiveOn) {
                     staffFbDb.ref('ember_live_data/_portal_live_mode').set({
@@ -4155,7 +4224,7 @@
                             syncBroadcastGroupsToFirebase(nextCleanName, targetGroups, freeShipThreshold, cardFeeRate, customerCredits, 'staff');
                         }
 
-                        saveUpdatedGroupsImmediately(targetGroups, `✏️ 방송 이름이 '${oldCleanName}' ➔ '${nextCleanName}'(으)로 변경되어 시트에 즉시 저장되었습니다!`);
+                        saveUpdatedGroupsImmediately(targetGroups, `✏️ 방송 이름이 '${oldCleanName}' ➔ '${nextCleanName}'(으)로 변경되어 시트에 즉시 저장되었습니다!`, nextCleanName);
                     },
                     oldCleanName,
                     '방송 이름 변경'
@@ -4758,12 +4827,13 @@
                             if (staffFbDb && cleanA) {
                                 const safeBKey = cleanBName.replace(/[.#$\[\]\/]/g, '_');
                                 const safeNickKey = String(targetNick).replace(/[.#$\[\]\/]/g, '_');
+                                const safeNickPinKey = newPin ? `${safeNickKey}___${newPin}` : safeNickKey;
                                 if (safeBKey && safeNickKey) {
-                                    staffFbDb.ref(`ember_live_data/_portal_broadcast_addresses/${safeBKey}/${safeNickKey}`).set(addrPayload).catch(() => {});
+                                    staffFbDb.ref(`ember_live_data/_portal_broadcast_addresses/${safeBKey}/${safeNickPinKey}`).set(addrPayload).catch(() => {});
                                 }
                                 if (safeNickKey) {
-                                    staffFbDb.ref(`ember_live_data/_portal_master_addrs/${safeNickKey}`).set(addrPayload).catch(() => {});
-                                    staffFbDb.ref(`ember_live_data/_portal_addresses/${safeNickKey}`).set(addrPayload).catch(() => {});
+                                    staffFbDb.ref(`ember_live_data/_portal_master_addrs/${safeNickPinKey}`).set(addrPayload).catch(() => {});
+                                    staffFbDb.ref(`ember_live_data/_portal_addresses/${safeNickPinKey}`).set(addrPayload).catch(() => {});
                                 }
                             }
 
@@ -4771,8 +4841,14 @@
                             if (cleanA) {
                                 setMasterAddresses(prev => {
                                     const map = new Map();
-                                    prev.forEach(item => map.set(normalizeString(item.nickname), item));
-                                    map.set(normalizeString(targetNick), {
+                                    prev.forEach(item => {
+                                        const ph = fixPhoneNumber(item.phone || '');
+                                        const p4 = ph.length >= 4 ? ph.slice(-4) : '';
+                                        const mKey = p4 ? `${normalizeString(item.nickname)}___${p4}` : normalizeString(item.nickname);
+                                        map.set(mKey, item);
+                                    });
+                                    const targetKey = newPin ? `${normalizeString(targetNick)}___${newPin}` : normalizeString(targetNick);
+                                    map.set(targetKey, {
                                         nickname: targetNick,
                                         realname: newAddr.realname || '',
                                         phone: cleanPh,
@@ -4793,7 +4869,7 @@
                                         address: cleanA,
                                         memo: cleanM,
                                         broadcastName: cleanBName,
-                                        forceOverwrite: true
+                                        forceOverwrite: Boolean(addrEditTarget?.phone)
                                     }
                                 }).catch(() => {});
                             }
@@ -4993,17 +5069,23 @@
                                 <button
                                     type="button"
                                     onClick={() => {
+                                        if (isBossLiveNow) {
+                                            openModal(`🚨 현재 사장님 주문서에서 [${bossActiveBroadcastName}] 생방송이 진행 중입니다.\n사장님 생방송 중에는 직원용 라이브 주문서를 사용할 수 없습니다.\n(기존 마감 방송 주문조회 및 CS 업무는 정상 사용 가능합니다)`);
+                                            return;
+                                        }
                                         setGlobalSearchResults(null);
                                         setActiveMainTab('live_order');
                                     }}
                                     className={`px-3 py-1.5 rounded-lg text-xs font-extrabold flex items-center gap-1.5 transition ${
-                                        activeMainTab === 'live_order'
-                                            ? 'bg-red-600 text-white shadow-sm ring-2 ring-red-200'
-                                            : 'bg-slate-900 text-amber-300 hover:bg-slate-800'
+                                        isBossLiveNow
+                                            ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                                            : activeMainTab === 'live_order'
+                                                ? 'bg-red-600 text-white shadow-sm ring-2 ring-red-200'
+                                                : 'bg-slate-900 text-amber-300 hover:bg-slate-800'
                                     }`}
                                 >
-                                    <Icon name="video-camera" weight="fill" size={14} className={activeMainTab === 'live_order' ? 'animate-pulse text-white' : 'text-red-400'} />
-                                    <span>🎥 라이브 주문서{liveOrderRows.length > 0 ? ` (${liveOrderRows.length}줄 작성중)` : ''}</span>
+                                    <Icon name={isBossLiveNow ? "lock-key" : "video-camera"} weight="fill" size={14} className={isBossLiveNow ? 'text-slate-400' : (activeMainTab === 'live_order' ? 'animate-pulse text-white' : 'text-red-400')} />
+                                    <span>{isBossLiveNow ? `🔒 사장님 생방송중 (${bossActiveBroadcastName})` : `🎥 라이브 주문서${liveOrderRows.length > 0 ? ` (${liveOrderRows.length}줄 작성중)` : ''}`}</span>
                                 </button>
                             </div>
                         </div>
@@ -6859,6 +6941,27 @@
                         )}
 
                         {activeMainTab === 'live_order' && (
+                            isBossLiveNow ? (
+                                <div className="w-full bg-white rounded-2xl border-2 border-red-200 p-10 text-center shadow-sm my-4">
+                                    <div className="w-14 h-14 rounded-2xl bg-red-50 text-red-600 flex items-center justify-center mx-auto mb-3">
+                                        <Icon name="lock-key" weight="fill" size={32} />
+                                    </div>
+                                    <h2 className="text-base font-black text-slate-900 mb-1">
+                                        🔴 현재 사장님 주문서에서 [{bossActiveBroadcastName}] 생방송이 진행 중입니다
+                                    </h2>
+                                    <p className="text-xs text-slate-500 mb-5 leading-relaxed">
+                                        유튜브 API 키 할당량 보호 및 실시간 주문서 충돌 방지를 위해,<br/>
+                                        사장님이 생방송 중일 때는 직원용 라이브 주문서가 자동으로 잠깁니다.
+                                    </p>
+                                    <button
+                                        type="button"
+                                        onClick={() => setActiveMainTab('orders')}
+                                        className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-extrabold rounded-xl text-xs shadow-sm"
+                                    >
+                                        📋 기존 주문조회 / CS 화면으로 돌아가기
+                                    </button>
+                                </div>
+                            ) : (
                             <div className="flex gap-3 h-[calc(100vh-125px)] min-h-[520px] w-full overflow-x-auto">
                                 {/* 1열: 유튜브 라이브 채팅창 (최근 500개 유지 & 클릭 시 닉네임 복사 + 빈 주문줄 생성) */}
                                 <div className="w-64 sm:w-72 bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col shrink-0 overflow-hidden">
@@ -7519,6 +7622,7 @@
                                     </div>
                                 </div>
                             </div>
+                            )
                         )}
                             </main>
                         </div>
